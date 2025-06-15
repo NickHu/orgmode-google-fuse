@@ -34,11 +34,7 @@ async fn main() -> std::io::Result<()> {
     let () = fuser::mount2(
         OrgFS::new(tasklists),
         &args.mount,
-        &[
-            MountOption::FSName("orgmode-google-fuse".to_string()),
-            MountOption::AutoUnmount,
-            MountOption::AllowOther,
-        ],
+        &[MountOption::FSName("orgmode-google-fuse".to_string())],
     )?;
     Ok(())
 }
