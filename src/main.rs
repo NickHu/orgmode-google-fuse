@@ -6,7 +6,7 @@ use futures::{stream, StreamExt};
 mod client;
 mod fuse;
 mod oauth;
-mod tasklist;
+mod org;
 
 #[derive(Parser, Debug)]
 #[clap(author = "Nick Hu", version, about)]
@@ -22,17 +22,27 @@ async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     let client = client::GoogleClient::new().await;
+
+    let cs = client.list_calendars().await.unwrap();
+    let calendars = stream::iter(cs.into_iter())
+        .filter_map(|cal| async {
+            let events = client.list_events(cal.id.as_ref().unwrap()).await.ok()?;
+            Some((cal, events).into())
+        })
+        .collect()
+        .await;
+
     let tls = client.list_tasklists().await.unwrap();
     let tasklists = stream::iter(tls.into_iter())
-        .then(|tl| async {
-            let tasks = client.list_tasks(tl.id.as_ref().unwrap()).await.unwrap();
-            (tl, tasks).into()
+        .filter_map(|tl| async {
+            let tasks = client.list_tasks(tl.id.as_ref().unwrap()).await.ok()?;
+            Some((tl, tasks).into())
         })
         .collect()
         .await;
 
     let () = fuser::mount2(
-        OrgFS::new(tasklists),
+        OrgFS::new(calendars, tasklists),
         &args.mount,
         &[MountOption::FSName("orgmode-google-fuse".to_string())],
     )?;

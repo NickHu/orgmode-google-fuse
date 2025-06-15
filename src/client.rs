@@ -1,3 +1,7 @@
+use google_calendar3::{
+    api::{Calendar, CalendarListEntry, Event},
+    CalendarHub,
+};
 use google_tasks1::{
     api::{Task, TaskList},
     hyper_rustls::{self, HttpsConnector},
@@ -8,6 +12,7 @@ use google_tasks1::{
 use crate::oauth::APPLICATION_SECRET;
 
 pub(crate) struct GoogleClient {
+    calendarhub: CalendarHub<HttpsConnector<HttpConnector>>,
     taskshub: TasksHub<HttpsConnector<HttpConnector>>,
 }
 
@@ -31,8 +36,48 @@ impl GoogleClient {
                         .enable_http1()
                         .build(),
                 );
+        let calendarhub = CalendarHub::new(client.clone(), auth.clone());
         let taskshub = TasksHub::new(client, auth);
-        Self { taskshub }
+        Self {
+            calendarhub,
+            taskshub,
+        }
+    }
+
+    pub async fn list_calendars(&self) -> Result<Vec<CalendarListEntry>> {
+        self.calendarhub
+            .calendar_list()
+            .list()
+            .doit()
+            .await
+            .map(|(_res, calendar_list_entry)| calendar_list_entry.items.unwrap_or_default())
+    }
+
+    pub async fn get_calendar(&self, calendar_id: &str) -> Result<Calendar> {
+        self.calendarhub
+            .calendars()
+            .get(calendar_id)
+            .doit()
+            .await
+            .map(|(_res, calendar)| calendar)
+    }
+
+    pub async fn list_events(&self, calendar_id: &str) -> Result<Vec<Event>> {
+        self.calendarhub
+            .events()
+            .list(calendar_id)
+            .doit()
+            .await
+            .map(|(_res, events)| events.items.unwrap_or_default())
+    }
+
+    pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> Result<Event> {
+        self.calendarhub
+            .events()
+            .get(calendar_id, event_id)
+            .doit()
+            .await
+            .map(|(_res, event)| event)
     }
 
     pub async fn list_tasklists(&self) -> Result<Vec<TaskList>> {

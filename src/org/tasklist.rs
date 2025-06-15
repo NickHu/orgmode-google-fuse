@@ -1,5 +1,7 @@
 use google_tasks1::api::{Task, TaskList};
 
+use super::ToOrg;
+
 #[derive(Debug, Clone)]
 pub(crate) struct OrgTaskList(pub(crate) TaskList, pub(crate) Vec<Task>);
 
@@ -9,8 +11,8 @@ impl From<(TaskList, Vec<Task>)> for OrgTaskList {
     }
 }
 
-impl OrgTaskList {
-    pub(crate) fn to_org(&self) -> String {
+impl ToOrg for OrgTaskList {
+    fn to_org(&self) -> String {
         self.1
             .iter()
             .map(|task| {
@@ -18,14 +20,14 @@ impl OrgTaskList {
                 let mut str = "* ".to_owned();
                 let mut planning = String::new();
                 if let Some(done) = &task.completed {
-                    planning.push_str("  CLOSED: ");
+                    planning.push_str("CLOSED: ");
                     planning.push('[');
                     planning.push_str(done);
                     planning.push(']');
                 } else {
                     str.push_str("TODO ");
                     if let Some(due) = &task.due {
-                        planning.push_str("  DEADLINE: ");
+                        planning.push_str("DEADLINE: ");
                         planning.push('<');
                         planning.push_str(due);
                         planning.push('>');
@@ -43,15 +45,15 @@ impl OrgTaskList {
                 }
 
                 // PROPERTIES
-                str.push_str("  :PROPERTIES:");
+                str.push_str(":PROPERTIES:");
                 str.push('\n');
                 macro_rules! print_property {
                     ($p:ident) => {
                         if let Some($p) = &task.$p {
-                            str.push_str("  :");
+                            str.push_str(":");
                             str.push_str(stringify!($p));
                             str.push_str(": ");
-                            str.push_str($p);
+                            str.push_str(&$p.to_org());
                             str.push('\n');
                         }
                     };
@@ -62,22 +64,21 @@ impl OrgTaskList {
                 print_property!(self_link);
                 print_property!(web_view_link);
                 if let Some(links) = &task.links {
-                    str.push_str(&format!("  :links: {:#?}", links));
+                    str.push_str(&format!(":links: {:?}", links));
                     str.push('\n');
                 }
-                str.push_str("  :END:");
-                str.push('\n');
+                str.push_str(":END:\n");
 
                 // SECTION
                 if let Some(notes) = &task.notes {
-                    str.push_str("  ");
+                    str.push('\n');
                     str.push_str(notes);
                     str.push('\n');
                 }
 
-                str.push('\n');
                 str
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
