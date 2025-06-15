@@ -9,7 +9,7 @@ use libc::ENOENT;
 use crate::org::ToOrg;
 use crate::org::{calendar::OrgCalendar, tasklist::OrgTaskList};
 
-const BLKSIZE: u32 = 512;
+const BLKSIZE: u32 = 4096; // 4 KiB
 const DEFAULT_DIR_ATTR: FileAttr = FileAttr {
     ino: 0,
     size: 0,
@@ -86,9 +86,11 @@ const fn tasks_dir_attr(uid: u32, gid: u32) -> FileAttr {
 }
 
 const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64) -> FileAttr {
+    let blocks = (size + BLKSIZE as u64 - 1) / BLKSIZE as u64;
     FileAttr {
         ino,
         size,
+        blocks,
         uid,
         gid,
         ..DEFAULT_FILE_ATTR
