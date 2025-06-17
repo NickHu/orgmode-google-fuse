@@ -35,7 +35,7 @@ enum Timestamp<'a, Tz: TimeZone> {
     Inactive(&'a DateTime<Tz>),
 }
 
-impl<'a, Tz: TimeZone> ToOrg for Timestamp<'a, Tz> {
+impl<Tz: TimeZone> ToOrg for Timestamp<'_, Tz> {
     fn to_org(&self) -> String {
         match self {
             Timestamp::Active(datetime) => format!("<{}>", datetime.to_org()),
