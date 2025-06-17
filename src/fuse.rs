@@ -4,7 +4,7 @@ use std::{
 };
 
 use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyEntry, Request};
-use libc::ENOENT;
+use libc::{EBADF, EINVAL, ENOENT, ENOTDIR};
 
 use crate::org::ToOrg;
 use crate::org::{calendar::OrgCalendar, tasklist::OrgTaskList};
@@ -53,7 +53,7 @@ pub(crate) struct OrgFS {
     pub(crate) tasklists: Vec<(Inode, OrgTaskList)>,
 }
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::new(0, 0);
 
 const ROOT_DIR_INO: Inode = 1;
 const fn root_dir_attr(uid: u32, gid: u32) -> FileAttr {
@@ -86,7 +86,7 @@ const fn tasks_dir_attr(uid: u32, gid: u32) -> FileAttr {
 }
 
 const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64) -> FileAttr {
-    let blocks = (size + BLKSIZE as u64 - 1) / BLKSIZE as u64;
+    let blocks = size.div_ceil(BLKSIZE as u64);
     FileAttr {
         ino,
         size,
@@ -131,83 +131,58 @@ impl OrgFS {
 
 impl Filesystem for OrgFS {
     fn lookup(&mut self, _req: &Request, parent: Inode, name: &OsStr, reply: ReplyEntry) {
-        match parent {
-            p if p == ROOT_DIR_INO => match name.to_str() {
-                Some("calendars") => {
-                    reply.entry(&TTL, &calendar_dir_attr(self.uid, self.gid), 0);
-                }
-                Some("tasks") => {
-                    reply.entry(&TTL, &tasks_dir_attr(self.uid, self.gid), 0);
-                }
-                _ => {
-                    reply.error(ENOENT);
-                }
+        if let Some(fileattr) = match parent {
+            ROOT_DIR_INO => match name.to_str() {
+                Some("calendars") => Some(calendar_dir_attr(self.uid, self.gid)),
+                Some("tasks") => Some(tasks_dir_attr(self.uid, self.gid)),
+                _ => None,
             },
-            p if p == CALENDAR_DIR_INO => match name.to_str() {
-                Some(file) => {
-                    if let Some(i) = self.calendars.iter().find(|x| {
-                        x.1 .0.summary.as_ref().map(|f| format!("{}.org", f))
-                            == Some(file.to_owned())
-                    }) {
-                        reply.entry(
-                            &TTL,
-                            &file_attr(self.uid, self.gid, i.0, i.1.to_org().len() as u64),
-                            0,
-                        );
-                    } else {
-                        reply.error(ENOENT);
-                    }
-                }
-                _ => reply.error(ENOENT),
-            },
-            p if p == TASKS_DIR_INO => match name.to_str() {
-                Some(file) => {
-                    if let Some(i) = self.tasklists.iter().find(|x| {
-                        x.1 .0.title.as_ref().map(|f| format!("{}.org", f)) == Some(file.to_owned())
-                    }) {
-                        reply.entry(
-                            &TTL,
-                            &file_attr(self.uid, self.gid, i.0, i.1.to_org().len() as u64),
-                            0,
-                        );
-                    } else {
-                        reply.error(ENOENT);
-                    }
-                }
-                _ => {
-                    reply.error(ENOENT);
-                }
-            },
-            _ => reply.error(ENOENT),
+            CALENDAR_DIR_INO => name.to_str().and_then(|filename| {
+                self.calendars.iter().find_map(|(ino, cal)| {
+                    cal.0
+                        .summary
+                        .as_ref()
+                        .filter(|summary| format!("{}.org", summary) == filename)
+                        .map(|_| file_attr(self.uid, self.gid, *ino, cal.to_org().len() as u64))
+                })
+            }),
+            TASKS_DIR_INO => name.to_str().and_then(|filename| {
+                self.tasklists.iter().find_map(|(ino, tl)| {
+                    tl.0.title
+                        .as_ref()
+                        .filter(|title| format!("{}.org", title) == filename)
+                        .map(|_| file_attr(self.uid, self.gid, *ino, tl.to_org().len() as u64))
+                })
+            }),
+            _ => None,
+        } {
+            reply.entry(&TTL, &fileattr, 0);
+        } else {
+            reply.error(ENOENT);
         }
     }
 
     fn getattr(&mut self, _req: &Request, ino: Inode, _fh: Option<u64>, reply: ReplyAttr) {
-        match ino {
-            i if i == ROOT_DIR_INO => reply.attr(&TTL, &root_dir_attr(self.uid, self.gid)),
-            i if i == CALENDAR_DIR_INO => reply.attr(&TTL, &calendar_dir_attr(self.uid, self.gid)),
-            i if i == TASKS_DIR_INO => reply.attr(&TTL, &tasks_dir_attr(self.uid, self.gid)),
-            i if self.is_calendar_file(i) => {
-                if let Some((_, cal)) = self.calendars.iter().find(|(ino, _)| ino == &i) {
-                    reply.attr(
-                        &TTL,
-                        &file_attr(self.uid, self.gid, i, cal.to_org().len() as u64),
-                    )
-                } else {
-                    reply.error(ENOENT);
-                }
-            }
-            i if self.is_tasks_file(i) => {
-                if let Some((_, tl)) = self.tasklists.iter().find(|(ino, _)| ino == &i) {
-                    reply.attr(
-                        &TTL,
-                        &file_attr(self.uid, self.gid, i, tl.to_org().len() as u64),
-                    )
-                } else {
-                    reply.error(ENOENT);
-                }
-            }
-            _ => reply.error(ENOENT),
+        if let Some(fileattr) = match ino {
+            ROOT_DIR_INO => Some(root_dir_attr(self.uid, self.gid)),
+            CALENDAR_DIR_INO => Some(calendar_dir_attr(self.uid, self.gid)),
+            TASKS_DIR_INO => Some(tasks_dir_attr(self.uid, self.gid)),
+            i if self.is_calendar_file(i) => self
+                .calendars
+                .iter()
+                .find(|(ino, _)| ino == &i)
+                .map(|(_, cal)| file_attr(self.uid, self.gid, i, cal.to_org().len() as u64)),
+            i if self.is_tasks_file(i) => self
+                .tasklists
+                .iter()
+                .find(|(ino, _)| ino == &i)
+                .map(|(_, tl)| file_attr(self.uid, self.gid, i, tl.to_org().len() as u64)),
+
+            _ => None,
+        } {
+            reply.attr(&TTL, &fileattr);
+        } else {
+            reply.error(ENOENT);
         }
     }
 
@@ -217,42 +192,38 @@ impl Filesystem for OrgFS {
         ino: Inode,
         _fh: u64,
         offset: i64,
-        _size: u32,
+        size: u32,
         _flags: i32,
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        tracing::debug!("read: ino: {}, offset: {}", ino, offset);
-        match () {
-            () if self.is_calendar_file(ino) => {
-                if let Some((_, cal)) = self.calendars.iter().find(|(i, _)| &ino == i) {
-                    let org = cal.to_org();
-                    let len = org.len() as i64;
-                    if offset >= len {
-                        reply.error(ENOENT);
-                        return;
-                    }
-                    reply.data(&org.as_bytes()[offset as usize..]);
-                } else {
-                    reply.error(ENOENT);
-                }
+        if offset < 0 {
+            reply.error(EINVAL);
+            return;
+        }
+        if let Some(org) = match () {
+            () if self.is_calendar_file(ino) => self
+                .calendars
+                .iter()
+                .find(|(i, _)| &ino == i)
+                .map(|(_, cal)| cal.to_org()),
+            () if self.is_tasks_file(ino) => self
+                .tasklists
+                .iter()
+                .find(|(i, _)| &ino == i)
+                .map(|(_, tl)| tl.to_org()),
+            () => None,
+        } {
+            if offset as usize >= org.len() {
+                reply.data(&[]);
+                return;
             }
-            () if self.is_tasks_file(ino) => {
-                if let Some((_, tl)) = self.tasklists.iter().find(|(i, _)| &ino == i) {
-                    let org = tl.to_org();
-                    let len = org.len() as i64;
-                    if offset >= len {
-                        reply.error(ENOENT);
-                        return;
-                    }
-                    reply.data(&org.as_bytes()[offset as usize..]);
-                } else {
-                    reply.error(ENOENT);
-                }
-            }
-            () => {
-                reply.error(ENOENT);
-            }
+            reply.data(
+                &org.as_bytes()
+                    [offset as usize..usize::min(org.len(), offset as usize + size as usize)],
+            );
+        } else {
+            reply.error(EBADF);
         }
     }
 
@@ -264,67 +235,73 @@ impl Filesystem for OrgFS {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        match ino {
-            i if i == ROOT_DIR_INO => {
-                let entries = [
-                    (ROOT_DIR_INO, "."),
-                    (ROOT_DIR_INO, ".."),
-                    (CALENDAR_DIR_INO, "calendars"),
-                    (TASKS_DIR_INO, "tasks"),
-                ];
-                for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-                    // i + 1 means the index of the next entry
-                    if reply.add(entry.0, (i + 1) as i64, FileType::Directory, entry.1) {
-                        break;
-                    }
-                }
-                reply.ok();
+        let entries = match ino {
+            ROOT_DIR_INO => {
+                vec![
+                    (ROOT_DIR_INO, FileType::Directory, ".".to_owned()),
+                    (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
+                    (
+                        CALENDAR_DIR_INO,
+                        FileType::Directory,
+                        "calendars".to_owned(),
+                    ),
+                    (TASKS_DIR_INO, FileType::Directory, "tasks".to_owned()),
+                ]
             }
-            i if i == CALENDAR_DIR_INO => {
+            CALENDAR_DIR_INO => {
                 let mut entries = vec![
                     (CALENDAR_DIR_INO, FileType::Directory, ".".to_owned()),
                     (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
                 ];
-                for (i, calendar) in self.calendars.iter().enumerate() {
-                    if let Some(summary) = calendar.1 .0.summary.as_ref() {
-                        entries.push((
-                            FILE_START_OFFSET + i as Inode,
-                            FileType::RegularFile,
-                            format!("{}.org", summary),
-                        ));
-                    }
-                }
-                for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-                    // i + 1 means the index of the next entry
-                    if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
-                        break;
-                    }
-                }
-                reply.ok();
+                entries.extend(
+                    self.calendars
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, (_, cal))| {
+                            cal.0.summary.as_ref().map(|summary| {
+                                (
+                                    FILE_START_OFFSET + i as Inode,
+                                    FileType::RegularFile,
+                                    format!("{}.org", summary),
+                                )
+                            })
+                        }),
+                );
+                entries
             }
-            i if i == TASKS_DIR_INO => {
+            TASKS_DIR_INO => {
                 let mut entries = vec![
                     (TASKS_DIR_INO, FileType::Directory, ".".to_owned()),
                     (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
                 ];
-                for (i, tasklist) in self.tasklists.iter().enumerate() {
-                    if let Some(title) = tasklist.1 .0.title.as_ref() {
-                        entries.push((
-                            FILE_START_OFFSET + self.calendars.len() as Inode + i as Inode,
-                            FileType::RegularFile,
-                            format!("{}.org", title),
-                        ));
-                    }
-                }
-                for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-                    // i + 1 means the index of the next entry
-                    if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
-                        break;
-                    }
-                }
-                reply.ok();
+                entries.extend(
+                    self.tasklists
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, (_, tl))| {
+                            tl.0.title.as_ref().map(|title| {
+                                (
+                                    FILE_START_OFFSET + self.calendars.len() as Inode + i as Inode,
+                                    FileType::RegularFile,
+                                    format!("{}.org", title),
+                                )
+                            })
+                        }),
+                );
+                entries
             }
-            _ => reply.error(ENOENT),
+            _ => {
+                reply.error(ENOTDIR);
+                return;
+            }
+        };
+
+        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+            // i + 1 means the index of the next entry
+            if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
+                break;
+            }
         }
+        reply.ok();
     }
 }
