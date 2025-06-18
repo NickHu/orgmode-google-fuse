@@ -18,13 +18,28 @@ pub(crate) struct GoogleClient {
 
 impl GoogleClient {
     pub async fn new() -> Self {
+        let dirs = directories::ProjectDirs::from("", "", "orgmode-google-fuse")
+            .expect("Failed to get project directories");
+        let authdir = dirs
+            .state_dir()
+            .expect("Failed to get state directory path");
+        std::fs::create_dir_all(authdir).expect("Failed to create state directory");
         let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
             APPLICATION_SECRET.clone(),
             yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
         )
+        .persist_tokens_to_disk(authdir.join("google_oauth2_token.json"))
         .build()
         .await
         .unwrap();
+
+        auth.token(&[
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events.readonly",
+            "https://www.googleapis.com/auth/tasks.readonly",
+        ])
+        .await
+        .expect("Failed to get OAuth token");
 
         let client =
             hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
