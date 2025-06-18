@@ -101,13 +101,14 @@ const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64) -> FileAttr {
 const FILE_START_OFFSET: Inode = TASKS_DIR_INO + 1;
 
 impl OrgFS {
-    pub(crate) fn new(calendars: Vec<OrgCalendar>, tasklists: Arc<Vec<OrgTaskList>>) -> Self {
+    pub(crate) fn new(calendars: Arc<Vec<OrgCalendar>>, tasklists: Arc<Vec<OrgTaskList>>) -> Self {
         let csl = calendars.len();
         Self {
             uid: nix::unistd::getuid().as_raw(),
             gid: nix::unistd::getgid().as_raw(),
             calendars: calendars
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(i, cal)| (FILE_START_OFFSET + i as u64, cal))
                 .collect(),

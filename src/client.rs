@@ -11,6 +11,8 @@ use google_tasks1::{
 
 use crate::oauth::APPLICATION_SECRET;
 
+type SyncToken = String;
+
 pub(crate) struct GoogleClient {
     calendarhub: CalendarHub<HttpsConnector<HttpConnector>>,
     taskshub: TasksHub<HttpsConnector<HttpConnector>>,
@@ -77,13 +79,27 @@ impl GoogleClient {
             .map(|(_res, calendar)| calendar)
     }
 
-    pub async fn list_events(&self, calendar_id: &str) -> Result<Vec<Event>> {
+    pub async fn list_events(&self, calendar_id: &str) -> Result<(Option<SyncToken>, Vec<Event>)> {
         self.calendarhub
             .events()
             .list(calendar_id)
             .doit()
             .await
-            .map(|(_res, events)| events.items.unwrap_or_default())
+            .map(|(_res, events)| (events.next_sync_token, events.items.unwrap_or_default()))
+    }
+
+    pub async fn list_events_with_sync_token(
+        &self,
+        calendar_id: &str,
+        sync_token: &SyncToken,
+    ) -> Result<(Option<SyncToken>, Vec<Event>)> {
+        self.calendarhub
+            .events()
+            .list(calendar_id)
+            .sync_token(sync_token)
+            .doit()
+            .await
+            .map(|(_res, events)| (events.next_sync_token, events.items.unwrap_or_default()))
     }
 
     pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> Result<Event> {

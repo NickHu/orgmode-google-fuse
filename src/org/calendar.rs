@@ -1,9 +1,10 @@
-use std::hash::Hash;
 use std::str::FromStr;
+use std::sync::Mutex;
+use std::{hash::Hash, sync::Arc};
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use chrono_tz::Tz;
-use evmap::{ReadHandle, WriteHandle};
+use evmap::{ReadHandleFactory, WriteHandle};
 use google_calendar3::api::{CalendarListEntry, Event, EventDateTime};
 
 use super::{ByETag, Id, ToOrg};
@@ -23,27 +24,67 @@ impl Hash for ByETag<Event> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct OrgCalendar(
-    ReadHandle<Id, Box<ByETag<Event>>, CalendarListEntry>,
-    WriteHandle<Id, Box<ByETag<Event>>, CalendarListEntry>,
+    ReadHandleFactory<Id, Box<ByETag<Event>>, Arc<CalendarListEntry>>,
+    #[allow(clippy::type_complexity)]
+    Arc<Mutex<WriteHandle<Id, Box<ByETag<Event>>, Arc<CalendarListEntry>>>>,
 );
 
 impl OrgCalendar {
-    pub fn calendar(&self) -> impl AsRef<CalendarListEntry> + use<'_> {
-        self.0.meta().expect("CalendarListEntry meta not found")
+    pub fn calendar(&self) -> impl AsRef<CalendarListEntry> {
+        self.0
+            .handle()
+            .meta()
+            .expect("CalendarListEntry meta not found")
+            .clone()
+    }
+
+    pub fn sync(&self, es: impl IntoIterator<Item = Event>) {
+        let mut guard = self.1.lock().unwrap();
+        for e in es {
+            let Some(id) = &e.id else {
+                tracing::warn!("Event without id found: {:?}", e);
+                continue;
+            };
+            if guard.contains_key(id) {
+                {
+                    let v = guard.get_one(id).unwrap();
+                    if v.0.etag == e.etag {
+                        tracing::debug!("Event {id} is up to date, skipping update");
+                        continue;
+                    }
+                }
+                // Update existing event
+                match e.status.as_deref() {
+                    Some("cancelled") => {
+                        tracing::info!("Removing event: {id}");
+                        guard.empty(id.clone());
+                    }
+                    _ => {
+                        tracing::info!("Updating event: {id}");
+                        guard.insert(id.clone(), Box::new(ByETag(e)));
+                    }
+                }
+            } else {
+                // Insert new event
+                tracing::info!("Inserting new event: {id}");
+                guard.insert(id.clone(), Box::new(ByETag(e)));
+            }
+        }
+        guard.refresh();
     }
 }
 
 impl From<(CalendarListEntry, Vec<Event>)> for OrgCalendar {
     fn from(es: (CalendarListEntry, Vec<Event>)) -> Self {
-        let (rh, mut wh) = evmap::with_meta(es.0);
+        let (rh, mut wh) = evmap::with_meta(Arc::new(es.0));
         wh.extend(es.1.into_iter().map(|event| {
             let id = event.id.clone().unwrap_or_default();
             (id, Box::new(ByETag(event)))
         }));
         wh.refresh();
-        Self(rh, wh)
+        Self(rh.factory(), Arc::new(Mutex::new(wh)))
     }
 }
 
@@ -100,11 +141,11 @@ impl ToOrg for EventDateTime {
 impl ToOrg for OrgCalendar {
     fn to_org(&self) -> String {
         self.0
+            .handle()
             .map_into::<_, Vec<_>, _>(|id, events| {
                 let event = events
-                    .iter()
-                    .max_by_key(|e| e.0.updated)
-                    .expect(&format!("No events found for id: {id}"));
+                    .get_one()
+                    .unwrap_or_else(|| panic!("No events found for id: {id}"));
                 if event.0.status.as_deref() == Some("cancelled") {
                     return None; // Skip cancelled events
                 }
