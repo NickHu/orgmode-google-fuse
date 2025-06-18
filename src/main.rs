@@ -21,6 +21,8 @@ struct Args {
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+    std::fs::create_dir_all(&args.mount).expect("Failed to create mount directory");
+
     let client = client::GoogleClient::new().await;
 
     let cs = client.list_calendars().await.unwrap();
