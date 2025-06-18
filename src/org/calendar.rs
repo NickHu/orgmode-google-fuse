@@ -1,17 +1,49 @@
+use std::hash::Hash;
 use std::str::FromStr;
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use chrono_tz::Tz;
+use evmap::{ReadHandle, WriteHandle};
 use google_calendar3::api::{CalendarListEntry, Event, EventDateTime};
 
-use super::ToOrg;
+use super::{ByETag, Id, ToOrg};
 
-#[derive(Debug, Clone)]
-pub(crate) struct OrgCalendar(pub(crate) CalendarListEntry, pub(crate) Vec<Event>);
+impl PartialEq for ByETag<Event> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id && self.0.etag == other.0.etag
+    }
+}
+
+impl Eq for ByETag<Event> {}
+
+impl Hash for ByETag<Event> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.id.hash(state);
+        self.0.etag.hash(state);
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OrgCalendar(
+    ReadHandle<Id, Box<ByETag<Event>>, CalendarListEntry>,
+    WriteHandle<Id, Box<ByETag<Event>>, CalendarListEntry>,
+);
+
+impl OrgCalendar {
+    pub fn calendar(&self) -> impl AsRef<CalendarListEntry> + use<'_> {
+        self.0.meta().expect("CalendarListEntry meta not found")
+    }
+}
 
 impl From<(CalendarListEntry, Vec<Event>)> for OrgCalendar {
     fn from(es: (CalendarListEntry, Vec<Event>)) -> Self {
-        Self(es.0, es.1)
+        let (rh, mut wh) = evmap::with_meta(es.0);
+        wh.extend(es.1.into_iter().map(|event| {
+            let id = event.id.clone().unwrap_or_default();
+            (id, Box::new(ByETag(event)))
+        }));
+        wh.refresh();
+        Self(rh, wh)
     }
 }
 
@@ -67,22 +99,24 @@ impl ToOrg for EventDateTime {
 
 impl ToOrg for OrgCalendar {
     fn to_org(&self) -> String {
-        self.1
-            .iter()
-            .filter(|event| {
-                // Filter out cancelled events
-                event.status.as_deref() != Some("cancelled")
-            })
-            .map(|event| {
+        self.0
+            .map_into::<_, Vec<_>, _>(|id, events| {
+                let event = events
+                    .iter()
+                    .max_by_key(|e| e.0.updated)
+                    .expect(&format!("No events found for id: {id}"));
+                if event.0.status.as_deref() == Some("cancelled") {
+                    return None; // Skip cancelled events
+                }
                 // HEADLINE
                 let mut str = "* ".to_owned();
-                if let Some(summary) = &event.summary {
+                if let Some(summary) = &event.0.summary {
                     str.push_str(summary);
                 } else {
                     str.push_str("Untitled Event");
                 }
                 str.push('\n');
-                match (&event.start, &event.end) {
+                match (&event.0.start, &event.0.end) {
                     (Some(start), Some(end)) => {
                         str.push_str(format!("{}--{}\n", start.to_org(), end.to_org()).as_str());
                     }
@@ -93,7 +127,7 @@ impl ToOrg for OrgCalendar {
                 str.push_str(":PROPERTIES:\n");
                 macro_rules! print_property {
                     ($p:ident) => {
-                        if let Some($p) = &event.$p {
+                        if let Some($p) = &event.0.$p {
                             str.push_str(":");
                             str.push_str(stringify!($p));
                             str.push_str(": ");
@@ -113,14 +147,16 @@ impl ToOrg for OrgCalendar {
                 str.push_str(":END:\n");
 
                 // SECTION
-                if let Some(description) = &event.description {
+                if let Some(description) = &event.0.description {
                     str.push('\n');
                     str.push_str(description);
                     str.push('\n');
                 }
 
-                str
+                Some(str)
             })
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>()
             .join("\n")
     }

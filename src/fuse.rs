@@ -139,7 +139,8 @@ impl Filesystem for OrgFS {
             },
             CALENDAR_DIR_INO => name.to_str().and_then(|filename| {
                 self.calendars.iter().find_map(|(ino, cal)| {
-                    cal.0
+                    cal.calendar()
+                        .as_ref()
                         .summary
                         .as_ref()
                         .filter(|summary| format!("{}.org", summary) == filename)
@@ -148,7 +149,9 @@ impl Filesystem for OrgFS {
             }),
             TASKS_DIR_INO => name.to_str().and_then(|filename| {
                 self.tasklists.iter().find_map(|(ino, tl)| {
-                    tl.0.title
+                    tl.tasklist()
+                        .as_ref()
+                        .title
                         .as_ref()
                         .filter(|title| format!("{}.org", title) == filename)
                         .map(|_| file_attr(self.uid, self.gid, *ino, tl.to_org().len() as u64))
@@ -258,7 +261,7 @@ impl Filesystem for OrgFS {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, (_, cal))| {
-                            cal.0.summary.as_ref().map(|summary| {
+                            cal.calendar().as_ref().summary.as_ref().map(|summary| {
                                 (
                                     FILE_START_OFFSET + i as Inode,
                                     FileType::RegularFile,
@@ -279,7 +282,7 @@ impl Filesystem for OrgFS {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, (_, tl))| {
-                            tl.0.title.as_ref().map(|title| {
+                            tl.tasklist().as_ref().title.as_ref().map(|title| {
                                 (
                                     FILE_START_OFFSET + self.calendars.len() as Inode + i as Inode,
                                     FileType::RegularFile,

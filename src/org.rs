@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 pub(crate) mod calendar;
 pub(crate) mod tasklist;
 
@@ -16,3 +18,10 @@ impl ToOrg for &str {
         self.to_string()
     }
 }
+
+#[derive(Debug, Clone)]
+struct ByETag<T>(T)
+where
+    T: Debug + Clone;
+
+type Id = String;

@@ -12,6 +12,7 @@ version = "0.1.0"
 chrono = "0.4.41"
 chrono-tz = "0.10.3"
 clap = { version = "4.3.14", features = ["derive"] }
+evmap = "10.0.2"
 fuser = "0.15.1"
 futures = "0.3.31"
 google-calendar3 = "6.0.0"
