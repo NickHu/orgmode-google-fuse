@@ -1,5 +1,6 @@
 use std::{
     ffi::OsStr,
+    sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -100,7 +101,7 @@ const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64) -> FileAttr {
 const FILE_START_OFFSET: Inode = TASKS_DIR_INO + 1;
 
 impl OrgFS {
-    pub(crate) fn new(calendars: Vec<OrgCalendar>, tasklists: Vec<OrgTaskList>) -> Self {
+    pub(crate) fn new(calendars: Vec<OrgCalendar>, tasklists: Arc<Vec<OrgTaskList>>) -> Self {
         let csl = calendars.len();
         Self {
             uid: nix::unistd::getuid().as_raw(),
@@ -111,7 +112,8 @@ impl OrgFS {
                 .map(|(i, cal)| (FILE_START_OFFSET + i as u64, cal))
                 .collect(),
             tasklists: tasklists
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .map(|(i, tl)| (FILE_START_OFFSET + csl as u64 + i as u64, tl))
                 .collect(),

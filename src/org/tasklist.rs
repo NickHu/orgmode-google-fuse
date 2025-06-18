@@ -1,6 +1,9 @@
-use std::hash::Hash;
+use std::{
+    hash::Hash,
+    sync::{Arc, Mutex},
+};
 
-use evmap::{ReadHandle, WriteHandle};
+use evmap::{ReadHandleFactory, WriteHandle};
 use google_tasks1::api::{Task, TaskList};
 
 use super::{ByETag, Id, ToOrg};
@@ -20,42 +23,77 @@ impl Hash for ByETag<Task> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct OrgTaskList(
-    ReadHandle<Id, Box<ByETag<Task>>, TaskList>,
-    WriteHandle<Id, Box<ByETag<Task>>, TaskList>,
+    ReadHandleFactory<Id, Box<ByETag<Task>>, Arc<TaskList>>,
+    #[allow(clippy::type_complexity)] Arc<Mutex<WriteHandle<Id, Box<ByETag<Task>>, Arc<TaskList>>>>,
 );
 
 impl OrgTaskList {
-    pub fn tasklist(&self) -> impl AsRef<TaskList> + use<'_> {
-        self.0.meta().expect("TaskList meta not found")
+    pub fn tasklist(&self) -> impl AsRef<TaskList> {
+        self.0
+            .handle()
+            .meta()
+            .expect("TaskList meta not found")
+            .clone()
+    }
+
+    pub fn sync(&self, ts: impl IntoIterator<Item = Task>) {
+        let mut guard = self.1.lock().unwrap();
+        for t in ts {
+            let Some(id) = &t.id else {
+                tracing::warn!("Task without id found: {:?}", t);
+                continue;
+            };
+            if guard.contains_key(id) {
+                {
+                    let v = guard.get_one(id).unwrap();
+                    if v.0.etag == t.etag {
+                        tracing::debug!("Task {id} is up to date, skipping update");
+                        continue;
+                    }
+                }
+                // Update existing task
+                match t.deleted {
+                    Some(true) => {
+                        tracing::info!("Removing task: {id}");
+                        guard.empty(id.clone());
+                    }
+                    _ => {
+                        tracing::info!("Updating task: {id}");
+                        guard.update(id.clone(), Box::new(ByETag(t)));
+                    }
+                }
+            } else {
+                // Add new task
+                tracing::info!("Adding new task: {id}");
+                guard.insert(id.clone(), Box::new(ByETag(t)));
+            }
+        }
+        guard.refresh();
     }
 }
 
 impl From<(TaskList, Vec<Task>)> for OrgTaskList {
     fn from(ts: (TaskList, Vec<Task>)) -> Self {
-        let (rh, mut wh) = evmap::with_meta(ts.0);
+        let (rh, mut wh) = evmap::with_meta(Arc::new(ts.0));
         wh.extend(ts.1.into_iter().map(|task| {
             let id = task.id.clone().unwrap_or_default();
             (id, Box::new(ByETag(task)))
         }));
         wh.refresh();
-        Self(rh, wh)
+        Self(rh.factory(), Arc::new(Mutex::new(wh)))
     }
 }
 
 impl ToOrg for OrgTaskList {
     fn to_org(&self) -> String {
         self.0
+            .handle()
             .map_into::<_, Vec<_>, _>(|id, tasks| {
                 let task = tasks
-                    .iter()
-                    .max_by_key(|t| {
-                        t.0.updated
-                            .as_ref()
-                            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                    })
-                    .expect(&format!("No tasks found for id: {id}"));
+                    .get_one()
+                    .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
                 // HEADLINE
                 let mut str = "* ".to_owned();
                 let mut planning = String::new();
