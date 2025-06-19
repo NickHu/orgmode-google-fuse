@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use clap::Parser;
 use fuse::OrgFS;
@@ -9,6 +12,8 @@ mod client;
 mod fuse;
 mod oauth;
 mod org;
+
+pub(crate) type Pid = u32;
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120); // 2 minutes
 
@@ -57,8 +62,10 @@ async fn main() -> std::io::Result<()> {
             .await,
     );
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Pid>();
+    let pending_fh = Arc::new(Mutex::new(HashMap::new()));
     let _handle = fuser::spawn_mount2(
-        OrgFS::new(calendars.clone(), tasklists.clone()),
+        OrgFS::new(calendars.clone(), tasklists.clone(), tx, pending_fh.clone()),
         &args.mount,
         &[MountOption::FSName("orgmode-google-fuse".to_string())],
     )?;
@@ -183,6 +190,17 @@ async fn main() -> std::io::Result<()> {
         _ = term => {
             tracing::info!("Received SIGTERM, unmounting…");
         }
+        _ = async {
+            while let Some(pid) = rx.recv().await {
+                tracing::debug!("Live PID: {}", pid);
+                let pending_fh = pending_fh.clone();
+                tokio::spawn(async move {
+                    waitpid_any::WaitHandle::open(pid as i32).expect("Failed to open waitpid").wait().unwrap();
+                    tracing::debug!("Dropping PID: {}", pid);
+                    pending_fh.lock().unwrap().retain(|(_ino, p), _| pid != *p)
+                });
+            }
+        } => {}
     }
 
     Ok(())

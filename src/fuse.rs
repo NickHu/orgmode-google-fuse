@@ -1,16 +1,22 @@
 use std::{
+    collections::HashMap,
     ffi::OsStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
 };
 
-use fuser::{FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyEntry, Request};
+use fuser::{
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyEmpty, ReplyEntry, ReplyOpen,
+    Request,
+};
+use itertools::Itertools;
 use libc::{EBADF, EINVAL, ENOENT, ENOTDIR};
+use orgize::Org;
 
-use crate::org::ToOrg;
 use crate::org::{calendar::OrgCalendar, tasklist::OrgTaskList};
+use crate::{org::ToOrg, Pid};
 
-const BLKSIZE: u32 = 4096; // 4 KiB
+const BLKSIZE: u32 = 512;
 const DEFAULT_DIR_ATTR: FileAttr = FileAttr {
     ino: 0,
     size: 0,
@@ -47,11 +53,15 @@ const DEFAULT_FILE_ATTR: FileAttr = FileAttr {
 };
 
 type Inode = u64;
+type FileHandle = u64;
 pub(crate) struct OrgFS {
     pub(crate) uid: u32,
     pub(crate) gid: u32,
     pub(crate) calendars: Vec<(Inode, OrgCalendar)>,
     pub(crate) tasklists: Vec<(Inode, OrgTaskList)>,
+    tx: tokio::sync::mpsc::UnboundedSender<Pid>,
+    #[allow(clippy::type_complexity)]
+    pending_fh: Arc<Mutex<HashMap<(Inode, Pid), (Vec<FileHandle>, Org<'static>)>>>,
 }
 
 const TTL: Duration = Duration::new(0, 0);
@@ -101,7 +111,13 @@ const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64) -> FileAttr {
 const FILE_START_OFFSET: Inode = TASKS_DIR_INO + 1;
 
 impl OrgFS {
-    pub(crate) fn new(calendars: Arc<Vec<OrgCalendar>>, tasklists: Arc<Vec<OrgTaskList>>) -> Self {
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn new(
+        calendars: Arc<Vec<OrgCalendar>>,
+        tasklists: Arc<Vec<OrgTaskList>>,
+        tx: tokio::sync::mpsc::UnboundedSender<Pid>,
+        pending_fh: Arc<Mutex<HashMap<(Inode, Pid), (Vec<FileHandle>, Org<'static>)>>>,
+    ) -> Self {
         let csl = calendars.len();
         Self {
             uid: nix::unistd::getuid().as_raw(),
@@ -118,6 +134,8 @@ impl OrgFS {
                 .enumerate()
                 .map(|(i, tl)| (FILE_START_OFFSET + csl as u64 + i as u64, tl))
                 .collect(),
+            tx,
+            pending_fh,
         }
     }
 
@@ -129,6 +147,53 @@ impl OrgFS {
         FILE_START_OFFSET + self.calendars.len() as Inode <= ino
             && ino
                 < FILE_START_OFFSET + self.calendars.len() as Inode + self.tasklists.len() as Inode
+    }
+
+    fn allocate_stateful_file_handle(&mut self, ino: Inode, pid: u32) -> u64 {
+        // vim and many other editors open a file, read it into memory, and then release the file
+        // handle almost immediately, as opposed to holding a file handle open for a session.
+        // We need to reconcile when a file is written from vim but we have no access to vim's
+        // buffer contents (vim won't hold any open file handles and the backing data may have
+        // changed in the meantime).
+        // The idea behind this is to snapshot the state as Org per PID the first time any process
+        // opens a file. Subsequent reads will return the same data from the snapshot, and writes
+        // are reconciled against this snapshot.
+        if let Some(org) = match ino {
+            i if self.is_calendar_file(i) => self
+                .calendars
+                .iter()
+                .find(|(ino, _)| ino == &i)
+                .map(|(_, cal)| cal.clone().to_org()),
+            i if self.is_tasks_file(i) => self
+                .tasklists
+                .iter()
+                .find(|(ino, _)| ino == &i)
+                .map(|(_, tl)| tl.to_org()),
+            _ => None,
+        } {
+            let mut guard = self.pending_fh.lock().unwrap();
+            if guard.keys().all(|(_, p)| *p != pid) {
+                // newly opened file, watch the pid
+                self.tx.send(pid).unwrap();
+            }
+            let fh = guard
+                .values()
+                .flat_map(|(fhs, _)| fhs)
+                .sorted()
+                .copied()
+                .enumerate()
+                .find(|(i, fh)| i + 1 != *fh as usize)
+                .map(|(_, fh)| fh)
+                .unwrap_or(1);
+            guard
+                .entry((ino, pid))
+                .or_insert((Vec::default(), org))
+                .0
+                .push(fh);
+            fh
+        } else {
+            0
+        }
     }
 }
 
@@ -197,7 +262,7 @@ impl Filesystem for OrgFS {
 
     fn read(
         &mut self,
-        _req: &Request,
+        req: &Request,
         ino: Inode,
         _fh: u64,
         offset: i64,
@@ -210,26 +275,15 @@ impl Filesystem for OrgFS {
             reply.error(EINVAL);
             return;
         }
-        if let Some(org) = match () {
-            () if self.is_calendar_file(ino) => self
-                .calendars
-                .iter()
-                .find(|(i, _)| &ino == i)
-                .map(|(_, cal)| cal.to_org_string()),
-            () if self.is_tasks_file(ino) => self
-                .tasklists
-                .iter()
-                .find(|(i, _)| &ino == i)
-                .map(|(_, tl)| tl.to_org_string()),
-            () => None,
-        } {
-            if offset as usize >= org.len() {
+        if let Some((_fhs, org)) = self.pending_fh.lock().unwrap().get(&(ino, req.pid())) {
+            let org_str = org.to_org_string();
+            if offset as usize >= org_str.len() {
                 reply.data(&[]);
                 return;
             }
             reply.data(
-                &org.as_bytes()
-                    [offset as usize..usize::min(org.len(), offset as usize + size as usize)],
+                &org_str.as_bytes()
+                    [offset as usize..usize::min(org_str.len(), offset as usize + size as usize)],
             );
         } else {
             reply.error(EBADF);
@@ -311,6 +365,31 @@ impl Filesystem for OrgFS {
                 break;
             }
         }
+        reply.ok();
+    }
+
+    fn open(&mut self, req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        let fh = self.allocate_stateful_file_handle(ino, req.pid());
+        reply.opened(fh, 0);
+    }
+
+    fn release(
+        &mut self,
+        req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        self.pending_fh
+            .lock()
+            .unwrap()
+            .entry((ino, req.pid()))
+            .and_modify(|(fhs, _)| {
+                fhs.retain(|&x| x != fh);
+            });
         reply.ok();
     }
 }
