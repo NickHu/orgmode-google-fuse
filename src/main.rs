@@ -91,17 +91,34 @@ async fn main() -> std::io::Result<()> {
                                             id,
                                             sync_token
                                         );
-                                        client
+                                        match client
                                             .list_events_with_sync_token(id.as_ref(), &sync_token)
                                             .await
-                                            .expect("Failed to list events with sync token")
+                                        {
+                                            Ok(events) => events,
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to list events for calendar {}: {}",
+                                                    id,
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
                                     }
                                     _ => {
                                         tracing::debug!("Syncing calendar {} without token", id);
-                                        client
-                                            .list_events(id.as_ref())
-                                            .await
-                                            .expect("Failed to list events")
+                                        match client.list_events(id.as_ref()).await {
+                                            Ok(events) => events,
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "Failed to list events for calendar {}: {}",
+                                                    id,
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
                                     }
                                 };
                                 org_calendar.sync(events);
