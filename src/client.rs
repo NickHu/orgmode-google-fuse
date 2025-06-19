@@ -83,6 +83,12 @@ impl GoogleClient {
         self.calendarhub
             .events()
             .list(calendar_id)
+            .time_min(
+                // a year ago
+                chrono::Utc::now()
+                    .checked_sub_signed(chrono::Duration::days(365))
+                    .unwrap(),
+            )
             .doit()
             .await
             .map(|(_res, events)| (events.next_sync_token, events.items.unwrap_or_default()))
