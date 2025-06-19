@@ -147,7 +147,9 @@ impl Filesystem for OrgFS {
                         .summary
                         .as_ref()
                         .filter(|summary| format!("{}.org", summary) == filename)
-                        .map(|_| file_attr(self.uid, self.gid, *ino, cal.to_org().len() as u64))
+                        .map(|_| {
+                            file_attr(self.uid, self.gid, *ino, cal.to_org_string().len() as u64)
+                        })
                 })
             }),
             TASKS_DIR_INO => name.to_str().and_then(|filename| {
@@ -157,7 +159,9 @@ impl Filesystem for OrgFS {
                         .title
                         .as_ref()
                         .filter(|title| format!("{}.org", title) == filename)
-                        .map(|_| file_attr(self.uid, self.gid, *ino, tl.to_org().len() as u64))
+                        .map(|_| {
+                            file_attr(self.uid, self.gid, *ino, tl.to_org_string().len() as u64)
+                        })
                 })
             }),
             _ => None,
@@ -177,13 +181,12 @@ impl Filesystem for OrgFS {
                 .calendars
                 .iter()
                 .find(|(ino, _)| ino == &i)
-                .map(|(_, cal)| file_attr(self.uid, self.gid, i, cal.to_org().len() as u64)),
+                .map(|(_, cal)| file_attr(self.uid, self.gid, i, cal.to_org_string().len() as u64)),
             i if self.is_tasks_file(i) => self
                 .tasklists
                 .iter()
                 .find(|(ino, _)| ino == &i)
-                .map(|(_, tl)| file_attr(self.uid, self.gid, i, tl.to_org().len() as u64)),
-
+                .map(|(_, tl)| file_attr(self.uid, self.gid, i, tl.to_org_string().len() as u64)),
             _ => None,
         } {
             reply.attr(&TTL, &fileattr);
@@ -212,12 +215,12 @@ impl Filesystem for OrgFS {
                 .calendars
                 .iter()
                 .find(|(i, _)| &ino == i)
-                .map(|(_, cal)| cal.to_org()),
+                .map(|(_, cal)| cal.to_org_string()),
             () if self.is_tasks_file(ino) => self
                 .tasklists
                 .iter()
                 .find(|(i, _)| &ino == i)
-                .map(|(_, tl)| tl.to_org()),
+                .map(|(_, tl)| tl.to_org_string()),
             () => None,
         } {
             if offset as usize >= org.len() {

@@ -87,7 +87,7 @@ impl From<(TaskList, Vec<Task>)> for OrgTaskList {
 }
 
 impl ToOrg for OrgTaskList {
-    fn to_org(&self) -> String {
+    fn to_org_string(&self) -> String {
         self.0
             .handle()
             .map_into::<_, Vec<_>, _>(|id, tasks| {
@@ -131,7 +131,7 @@ impl ToOrg for OrgTaskList {
                             str.push_str(":");
                             str.push_str(stringify!($p));
                             str.push_str(": ");
-                            str.push_str(&$p.to_org());
+                            str.push_str(&$p.to_org_string());
                             str.push('\n');
                         }
                     };

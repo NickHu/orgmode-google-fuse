@@ -90,13 +90,13 @@ impl From<(CalendarListEntry, Vec<Event>)> for OrgCalendar {
 }
 
 impl ToOrg for NaiveDate {
-    fn to_org(&self) -> String {
+    fn to_org_string(&self) -> String {
         self.format("%Y-%m-%d %a").to_string()
     }
 }
 
 impl<Tz: TimeZone> ToOrg for DateTime<Tz> {
-    fn to_org(&self) -> String {
+    fn to_org_string(&self) -> String {
         self.with_timezone(&Local)
             .format("%Y-%m-%d %a %H:%M")
             .to_string()
@@ -213,12 +213,12 @@ impl<Tz: TimeZone> ToOrg for Timestamp<Tz>
 where
     Tz::Offset: Copy,
 {
-    fn to_org(&self) -> String {
+    fn to_org_string(&self) -> String {
         match self {
-            Timestamp::ActiveDate(naive_date) => format!("<{}>", naive_date.to_org()),
-            Timestamp::InactiveDate(naive_date) => format!("[{}]", naive_date.to_org()),
-            Timestamp::ActiveDateTime(datetime) => format!("<{}>", datetime.to_org()),
-            Timestamp::InactiveDateTime(datetime) => format!("[{}]", datetime.to_org()),
+            Timestamp::ActiveDate(naive_date) => format!("<{}>", naive_date.to_org_string()),
+            Timestamp::InactiveDate(naive_date) => format!("[{}]", naive_date.to_org_string()),
+            Timestamp::ActiveDateTime(datetime) => format!("<{}>", datetime.to_org_string()),
+            Timestamp::InactiveDateTime(datetime) => format!("[{}]", datetime.to_org_string()),
         }
     }
 }
@@ -245,7 +245,7 @@ impl From<EventDateTime> for Timestamp<Local> {
 }
 
 impl ToOrg for OrgCalendar {
-    fn to_org(&self) -> String {
+    fn to_org_string(&self) -> String {
         self.0
             .handle()
             .read()
@@ -280,8 +280,8 @@ impl ToOrg for OrgCalendar {
                         str.push_str(
                             format!(
                                 "{}--{}\n",
-                                Timestamp::from(start.clone()).to_org(),
-                                Timestamp::from(end.clone()).to_org()
+                                Timestamp::from(start.clone()).to_org_string(),
+                                Timestamp::from(end.clone()).to_org_string()
                             )
                             .as_str(),
                         );
@@ -297,7 +297,7 @@ impl ToOrg for OrgCalendar {
                             str.push_str(":");
                             str.push_str(stringify!($p));
                             str.push_str(": ");
-                            str.push_str(&$e.to_org());
+                            str.push_str(&$e.to_org_string());
                             str.push('\n');
                         }
                     };
