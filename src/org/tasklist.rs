@@ -1,12 +1,13 @@
+use std::time::SystemTime;
 use std::{
     hash::Hash,
     sync::{Arc, Mutex},
 };
 
 use evmap::{ReadHandleFactory, WriteHandle};
-use google_tasks1::api::{Task, TaskList};
+use google_tasks1::api::{Task, TaskList, Tasks};
 
-use super::{ByETag, Id, ToOrg};
+use super::{def_org_meta, ByETag, Id, ToOrg};
 
 impl PartialEq for ByETag<Task> {
     fn eq(&self, other: &Self) -> bool {
@@ -23,24 +24,24 @@ impl Hash for ByETag<Task> {
     }
 }
 
+def_org_meta! {
+    TaskListMeta { tasklist: TaskList, updated: SystemTime }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OrgTaskList(
-    ReadHandleFactory<Id, Box<ByETag<Task>>, Arc<TaskList>>,
-    #[allow(clippy::type_complexity)] Arc<Mutex<WriteHandle<Id, Box<ByETag<Task>>, Arc<TaskList>>>>,
+    ReadHandleFactory<Id, Box<ByETag<Task>>, TaskListMeta>,
+    #[allow(clippy::type_complexity)] Arc<Mutex<WriteHandle<Id, Box<ByETag<Task>>, TaskListMeta>>>,
 );
 
 impl OrgTaskList {
-    pub fn tasklist(&self) -> impl AsRef<TaskList> {
-        self.0
-            .handle()
-            .meta()
-            .expect("TaskList meta not found")
-            .clone()
+    pub fn meta(&self) -> TaskListMeta {
+        self.0.handle().meta().expect("meta not found").clone()
     }
 
-    pub fn sync(&self, ts: impl IntoIterator<Item = Task>) {
+    pub fn sync(&self, ts: Tasks) {
         let mut guard = self.1.lock().unwrap();
-        for t in ts {
+        for t in ts.items.unwrap_or_default() {
             let Some(id) = &t.id else {
                 tracing::warn!("Task without id found: {:?}", t);
                 continue;
@@ -74,10 +75,19 @@ impl OrgTaskList {
     }
 }
 
-impl From<(TaskList, Vec<Task>)> for OrgTaskList {
-    fn from(ts: (TaskList, Vec<Task>)) -> Self {
-        let (rh, mut wh) = evmap::with_meta(Arc::new(ts.0));
-        wh.extend(ts.1.into_iter().map(|task| {
+impl From<(TaskList, Tasks)> for OrgTaskList {
+    fn from(ts: (TaskList, Tasks)) -> Self {
+        let updated =
+            ts.0.updated
+                .as_ref()
+                .and_then(|str| {
+                    chrono::DateTime::parse_from_rfc3339(str)
+                        .ok()
+                        .map(|x| x.into())
+                })
+                .unwrap_or(std::time::UNIX_EPOCH);
+        let (rh, mut wh) = evmap::with_meta((ts.0, updated).into());
+        wh.extend(ts.1.items.unwrap_or_default().into_iter().map(|task| {
             let id = task.id.clone().unwrap_or_default();
             (id, Box::new(ByETag(task)))
         }));

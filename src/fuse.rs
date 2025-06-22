@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     sync::{Arc, Mutex},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use fuser::{
@@ -96,12 +96,16 @@ const fn tasks_dir_attr(uid: u32, gid: u32) -> FileAttr {
     }
 }
 
-const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64) -> FileAttr {
+const fn file_attr(uid: u32, gid: u32, ino: Inode, size: u64, time: SystemTime) -> FileAttr {
     let blocks = size.div_ceil(BLKSIZE as u64);
     FileAttr {
         ino,
         size,
         blocks,
+        atime: time,
+        mtime: time,
+        ctime: time,
+        crtime: time,
         uid,
         gid,
         ..DEFAULT_FILE_ATTR
@@ -207,25 +211,37 @@ impl Filesystem for OrgFS {
             },
             CALENDAR_DIR_INO => name.to_str().and_then(|filename| {
                 self.calendars.iter().find_map(|(ino, cal)| {
-                    cal.calendar()
-                        .as_ref()
+                    cal.meta()
+                        .calendar()
                         .summary
                         .as_ref()
                         .filter(|summary| format!("{}.org", summary) == filename)
                         .map(|_| {
-                            file_attr(self.uid, self.gid, *ino, cal.to_org_string().len() as u64)
+                            file_attr(
+                                self.uid,
+                                self.gid,
+                                *ino,
+                                cal.to_org_string().len() as u64,
+                                *cal.meta().updated(),
+                            )
                         })
                 })
             }),
             TASKS_DIR_INO => name.to_str().and_then(|filename| {
                 self.tasklists.iter().find_map(|(ino, tl)| {
-                    tl.tasklist()
-                        .as_ref()
+                    tl.meta()
+                        .tasklist()
                         .title
                         .as_ref()
                         .filter(|title| format!("{}.org", title) == filename)
                         .map(|_| {
-                            file_attr(self.uid, self.gid, *ino, tl.to_org_string().len() as u64)
+                            file_attr(
+                                self.uid,
+                                self.gid,
+                                *ino,
+                                tl.to_org_string().len() as u64,
+                                *tl.meta().updated(),
+                            )
                         })
                 })
             }),
@@ -242,16 +258,34 @@ impl Filesystem for OrgFS {
             ROOT_DIR_INO => Some(root_dir_attr(self.uid, self.gid)),
             CALENDAR_DIR_INO => Some(calendar_dir_attr(self.uid, self.gid)),
             TASKS_DIR_INO => Some(tasks_dir_attr(self.uid, self.gid)),
-            i if self.is_calendar_file(i) => self
-                .calendars
-                .iter()
-                .find(|(ino, _)| ino == &i)
-                .map(|(_, cal)| file_attr(self.uid, self.gid, i, cal.to_org_string().len() as u64)),
-            i if self.is_tasks_file(i) => self
-                .tasklists
-                .iter()
-                .find(|(ino, _)| ino == &i)
-                .map(|(_, tl)| file_attr(self.uid, self.gid, i, tl.to_org_string().len() as u64)),
+            i if self.is_calendar_file(i) => {
+                self.calendars
+                    .iter()
+                    .find(|(ino, _)| ino == &i)
+                    .map(|(_, cal)| {
+                        file_attr(
+                            self.uid,
+                            self.gid,
+                            i,
+                            cal.to_org_string().len() as u64,
+                            *cal.meta().updated(),
+                        )
+                    })
+            }
+            i if self.is_tasks_file(i) => {
+                self.tasklists
+                    .iter()
+                    .find(|(ino, _)| ino == &i)
+                    .map(|(_, tl)| {
+                        file_attr(
+                            self.uid,
+                            self.gid,
+                            i,
+                            tl.to_org_string().len() as u64,
+                            *tl.meta().updated(),
+                        )
+                    })
+            }
             _ => None,
         } {
             reply.attr(&TTL, &fileattr);
@@ -321,7 +355,7 @@ impl Filesystem for OrgFS {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, (_, cal))| {
-                            cal.calendar().as_ref().summary.as_ref().map(|summary| {
+                            cal.meta().calendar().summary.as_ref().map(|summary| {
                                 (
                                     FILE_START_OFFSET + i as Inode,
                                     FileType::RegularFile,
@@ -342,7 +376,7 @@ impl Filesystem for OrgFS {
                         .iter()
                         .enumerate()
                         .filter_map(|(i, (_, tl))| {
-                            tl.tasklist().as_ref().title.as_ref().map(|title| {
+                            tl.meta().tasklist().title.as_ref().map(|title| {
                                 (
                                     FILE_START_OFFSET + self.calendars.len() as Inode + i as Inode,
                                     FileType::RegularFile,

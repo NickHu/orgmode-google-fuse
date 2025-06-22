@@ -43,3 +43,37 @@ where
     T: Debug + Clone;
 
 type Id = String;
+
+macro_rules! def_org_meta {
+    ($ty:ty { $($field:ident : $field_ty:ty),* }) => {
+        paste::paste!{
+            #[derive(Debug, Clone)]
+            struct [<$ty Inner>] {
+                $(
+                    $field: $field_ty,
+                )*
+            }
+
+            #[derive(Debug, Clone)]
+            pub(crate) struct $ty(std::sync::Arc<[<$ty Inner>]>);
+
+            impl From<($($field_ty),*)> for $ty {
+                fn from(($($field),*): ($($field_ty),*)) -> Self {
+                    $ty(std::sync::Arc::new([<$ty Inner>] {
+                        $($field),*
+                    }))
+                }
+            }
+
+            impl $ty {
+                $(
+                    pub fn $field(&self) -> &$field_ty {
+                        &self.0.$field
+                    }
+                )*
+            }
+        }
+    };
+}
+
+pub(self) use def_org_meta;

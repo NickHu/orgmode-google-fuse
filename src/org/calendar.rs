@@ -1,14 +1,15 @@
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::SystemTime;
 use std::{hash::Hash, sync::Arc};
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use evmap::{ReadHandleFactory, WriteHandle};
-use google_calendar3::api::{CalendarListEntry, Event, EventDateTime};
+use google_calendar3::api::{CalendarListEntry, Event, EventDateTime, Events};
 use itertools::Itertools;
 
-use super::{ByETag, Id, ToOrg};
+use super::{def_org_meta, ByETag, Id, ToOrg};
 
 impl PartialEq for ByETag<Event> {
     fn eq(&self, other: &Self) -> bool {
@@ -25,25 +26,24 @@ impl Hash for ByETag<Event> {
     }
 }
 
+def_org_meta! {
+    CalendarMeta { calendar: CalendarListEntry, updated: SystemTime }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OrgCalendar(
-    ReadHandleFactory<Id, Box<ByETag<Event>>, Arc<CalendarListEntry>>,
-    #[allow(clippy::type_complexity)]
-    Arc<Mutex<WriteHandle<Id, Box<ByETag<Event>>, Arc<CalendarListEntry>>>>,
+    ReadHandleFactory<Id, Box<ByETag<Event>>, CalendarMeta>,
+    #[allow(clippy::type_complexity)] Arc<Mutex<WriteHandle<Id, Box<ByETag<Event>>, CalendarMeta>>>,
 );
 
 impl OrgCalendar {
-    pub fn calendar(&self) -> impl AsRef<CalendarListEntry> {
-        self.0
-            .handle()
-            .meta()
-            .expect("CalendarListEntry meta not found")
-            .clone()
+    pub fn meta(&self) -> CalendarMeta {
+        self.0.handle().meta().expect("meta not found").clone()
     }
 
-    pub fn sync(&self, es: impl IntoIterator<Item = Event>) {
+    pub fn sync(&self, es: Events) {
         let mut guard = self.1.lock().unwrap();
-        for e in es {
+        for e in es.items.unwrap_or_default() {
             let Some(id) = &e.id else {
                 tracing::warn!("Event without id found: {:?}", e);
                 continue;
@@ -77,10 +77,20 @@ impl OrgCalendar {
     }
 }
 
-impl From<(CalendarListEntry, Vec<Event>)> for OrgCalendar {
-    fn from(es: (CalendarListEntry, Vec<Event>)) -> Self {
-        let (rh, mut wh) = evmap::with_meta(Arc::new(es.0));
-        wh.extend(es.1.into_iter().map(|event| {
+impl From<(CalendarListEntry, Events)> for OrgCalendar {
+    fn from(es: (CalendarListEntry, Events)) -> Self {
+        let (rh, mut wh) = evmap::with_meta(
+            (
+                es.0,
+                es.1.updated
+                    .as_ref()
+                    .copied()
+                    .map(|dt| dt.into())
+                    .unwrap_or(std::time::UNIX_EPOCH),
+            )
+                .into(),
+        );
+        wh.extend(es.1.items.unwrap_or_default().into_iter().map(|event| {
             let id = event.id.clone().unwrap_or_default();
             (id, Box::new(ByETag(event)))
         }));

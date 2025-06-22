@@ -1,9 +1,9 @@
 use google_calendar3::{
-    api::{Calendar, CalendarListEntry, Event},
+    api::{Calendar, CalendarList, Event, Events},
     CalendarHub,
 };
 use google_tasks1::{
-    api::{Task, TaskList},
+    api::{Task, TaskList, TaskLists, Tasks},
     hyper_rustls::{self, HttpsConnector},
     hyper_util::{self, client::legacy::connect::HttpConnector},
     yup_oauth2, Result, TasksHub,
@@ -61,13 +61,13 @@ impl GoogleClient {
         }
     }
 
-    pub async fn list_calendars(&self) -> Result<Vec<CalendarListEntry>> {
+    pub async fn list_calendars(&self) -> Result<CalendarList> {
         self.calendarhub
             .calendar_list()
             .list()
             .doit()
             .await
-            .map(|(_res, calendar_list_entry)| calendar_list_entry.items.unwrap_or_default())
+            .map(|(_res, calendar_list)| calendar_list)
     }
 
     pub async fn get_calendar(&self, calendar_id: &str) -> Result<Calendar> {
@@ -79,7 +79,7 @@ impl GoogleClient {
             .map(|(_res, calendar)| calendar)
     }
 
-    pub async fn list_events(&self, calendar_id: &str) -> Result<(Option<SyncToken>, Vec<Event>)> {
+    pub async fn list_events(&self, calendar_id: &str) -> Result<Events> {
         self.calendarhub
             .events()
             .list(calendar_id)
@@ -91,21 +91,21 @@ impl GoogleClient {
             )
             .doit()
             .await
-            .map(|(_res, events)| (events.next_sync_token, events.items.unwrap_or_default()))
+            .map(|(_res, events)| events)
     }
 
     pub async fn list_events_with_sync_token(
         &self,
         calendar_id: &str,
         sync_token: &SyncToken,
-    ) -> Result<(Option<SyncToken>, Vec<Event>)> {
+    ) -> Result<Events> {
         self.calendarhub
             .events()
             .list(calendar_id)
             .sync_token(sync_token)
             .doit()
             .await
-            .map(|(_res, events)| (events.next_sync_token, events.items.unwrap_or_default()))
+            .map(|(_res, events)| events)
     }
 
     pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> Result<Event> {
@@ -117,13 +117,13 @@ impl GoogleClient {
             .map(|(_res, event)| event)
     }
 
-    pub async fn list_tasklists(&self) -> Result<Vec<TaskList>> {
+    pub async fn list_tasklists(&self) -> Result<TaskLists> {
         self.taskshub
             .tasklists()
             .list()
             .doit()
             .await
-            .map(|(_res, tasklists)| tasklists.items.unwrap_or_default())
+            .map(|(_res, tasklists)| tasklists)
     }
 
     pub async fn get_tasklist(&self, tasklist_id: &str) -> Result<TaskList> {
@@ -135,13 +135,13 @@ impl GoogleClient {
             .map(|(_res, tasklist)| tasklist)
     }
 
-    pub async fn list_tasks(&self, tasklist_id: &str) -> Result<Vec<Task>> {
+    pub async fn list_tasks(&self, tasklist_id: &str) -> Result<Tasks> {
         self.taskshub
             .tasks()
             .list(tasklist_id)
             .doit()
             .await
-            .map(|(_res, tasks)| tasks.items.unwrap_or_default())
+            .map(|(_res, tasks)| tasks)
     }
 
     pub async fn get_task(&self, tasklist_id: &str, task_id: &str) -> Result<Task> {
