@@ -24,7 +24,7 @@ impl GoogleClient {
             .expect("Failed to get project directories");
         let authdir = dirs
             .state_dir()
-            .expect("Failed to get state directory path");
+            .unwrap_or(&std::path::Path::new("~/.local/state/orgmode-google-fuse"));
         std::fs::create_dir_all(authdir).expect("Failed to create state directory");
         let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
             APPLICATION_SECRET.clone(),
