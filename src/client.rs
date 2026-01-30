@@ -6,7 +6,7 @@ use google_tasks1::{
     api::{Task, TaskList, TaskLists, Tasks},
     hyper_rustls::{self, HttpsConnector},
     hyper_util::{self, client::legacy::connect::HttpConnector},
-    yup_oauth2, Result, TasksHub,
+    Result, TasksHub,
 };
 
 use crate::oauth::APPLICATION_SECRET;
@@ -50,7 +50,7 @@ impl GoogleClient {
                         .with_native_roots()
                         .unwrap()
                         .https_or_http()
-                        .enable_http1()
+                        .enable_http2()
                         .build(),
                 );
         let calendarhub = CalendarHub::new(client.clone(), auth.clone());
