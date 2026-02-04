@@ -22,7 +22,7 @@ yup-oauth2 = "12.1.2"
 itertools = "0.14.0"
 libc = "0.2.180"
 nix = { version = "0.31.1", features = ["user"] }
-orgize = "0.9.0"
+orgize = { version = "0.10.0-alpha.10", features = ["chrono"] }
 paste = "1.0.15"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "signal"] }
 tracing = "0.1.44"

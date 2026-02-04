@@ -24,7 +24,7 @@ impl GoogleClient {
             .expect("Failed to get project directories");
         let authdir = dirs
             .state_dir()
-            .unwrap_or(&std::path::Path::new("~/.local/state/orgmode-google-fuse"));
+            .unwrap_or(std::path::Path::new("~/.local/state/orgmode-google-fuse"));
         std::fs::create_dir_all(authdir).expect("Failed to create state directory");
         let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
             APPLICATION_SECRET.clone(),
@@ -70,6 +70,7 @@ impl GoogleClient {
             .map(|(_res, calendar_list)| calendar_list)
     }
 
+    #[allow(unused)]
     pub async fn get_calendar(&self, calendar_id: &str) -> Result<Calendar> {
         self.calendarhub
             .calendars()
@@ -108,6 +109,7 @@ impl GoogleClient {
             .map(|(_res, events)| events)
     }
 
+    #[allow(unused)]
     pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> Result<Event> {
         self.calendarhub
             .events()
@@ -144,6 +146,7 @@ impl GoogleClient {
             .map(|(_res, tasks)| tasks)
     }
 
+    #[allow(unused)]
     pub async fn get_task(&self, tasklist_id: &str, task_id: &str) -> Result<Task> {
         self.taskshub
             .tasks()
@@ -152,4 +155,50 @@ impl GoogleClient {
             .await
             .map(|(_res, task)| task)
     }
+
+    pub async fn insert_task(&self, tasklist_id: &str, task: Task) -> Result<Task> {
+        self.taskshub
+            .tasks()
+            .insert(task, tasklist_id)
+            .doit()
+            .await
+            .map(|(_res, task)| task)
+    }
+
+    pub async fn patch_task(&self, tasklist_id: &str, task_id: &str, task: Task) -> Result<Task> {
+        self.taskshub
+            .tasks()
+            .patch(task, tasklist_id, task_id)
+            .doit()
+            .await
+            .map(|(_res, task)| task)
+    }
+
+    pub async fn delete_task(&self, tasklist_id: &str, task_id: &str) -> Result<()> {
+        self.taskshub
+            .tasks()
+            .delete(tasklist_id, task_id)
+            .doit()
+            .await
+            .map(|_res| ())
+    }
+}
+
+pub(crate) enum WriteCommand {
+    InsertTask {
+        tasklist_id: String,
+        task: Task,
+    },
+    PatchTask {
+        tasklist_id: String,
+        task_id: String,
+        task: Task,
+    },
+    DeleteTask {
+        tasklist_id: String,
+        task_id: String,
+    },
+    SyncTasklist {
+        tasklist_id: String,
+    },
 }

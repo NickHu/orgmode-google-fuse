@@ -4,8 +4,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chrono::Local;
 use evmap::{ReadHandleFactory, WriteHandle};
 use google_tasks1::api::{Task, TaskList, Tasks};
+use orgize::ast::Headline;
+
+use crate::org::timestamp::Timestamp;
 
 use super::{def_org_meta, ByETag, Id, ToOrg};
 
@@ -39,7 +43,7 @@ impl OrgTaskList {
         self.0.handle().meta().expect("meta not found").clone()
     }
 
-    pub fn sync(&self, ts: Tasks) {
+    pub fn sync(&self, ts: Tasks, updated: SystemTime) {
         let mut guard = self.1.lock().unwrap();
         for t in ts.items.unwrap_or_default() {
             let Some(id) = &t.id else {
@@ -71,7 +75,44 @@ impl OrgTaskList {
                 guard.insert(id.clone(), Box::new(ByETag(t)));
             }
         }
+        guard.set_meta((self.meta().tasklist().clone(), updated).into());
         guard.refresh();
+    }
+
+    pub fn delete_id(&self, id: &str) {
+        let mut guard = self.1.lock().unwrap();
+        tracing::debug!("Deleting task: {id}");
+        guard.empty(id.to_owned());
+        guard.refresh();
+    }
+
+    pub fn parse_task(headline: &Headline) -> Task {
+        Task {
+            completed: headline
+                .closed()
+                .and_then(|p| p.start_to_chrono())
+                .map(|dt| dt.and_local_timezone(Local).unwrap().to_rfc3339()),
+            due: headline
+                .deadline()
+                .and_then(|p| p.start_to_chrono())
+                .map(|dt| dt.and_local_timezone(Local).unwrap().to_rfc3339()),
+            etag: headline
+                .properties()
+                .and_then(|drawer| drawer.get("etag"))
+                .map(|t| t.as_ref().to_owned()),
+            id: headline
+                .properties()
+                .and_then(|drawer| drawer.get("id"))
+                .map(|t| t.as_ref().to_owned()),
+            notes: headline.section().map(|s| s.raw().trim().to_owned()),
+            status: if headline.is_done() {
+                Some("completed".to_owned())
+            } else {
+                Some("needsAction".to_owned())
+            },
+            title: Some(headline.title_raw()),
+            ..Task::default()
+        }
     }
 }
 
@@ -107,18 +148,26 @@ impl ToOrg for OrgTaskList {
                 // HEADLINE
                 let mut str = "* ".to_owned();
                 let mut planning = String::new();
-                if let Some(done) = &task.0.completed {
+                if let Some(done) = &task
+                    .0
+                    .completed
+                    .as_ref()
+                    .and_then(|str| chrono::DateTime::parse_from_rfc3339(str).ok())
+                    .map(|dt| dt.with_timezone(&Local))
+                {
                     planning.push_str("CLOSED: ");
-                    planning.push('[');
-                    planning.push_str(done);
-                    planning.push(']');
+                    planning.push_str(&Timestamp::from(*done).deactivate().to_org_string());
                 } else {
                     str.push_str("TODO ");
-                    if let Some(due) = &task.0.due {
+                    if let Some(due) = &task
+                        .0
+                        .due
+                        .as_ref()
+                        .and_then(|str| chrono::DateTime::parse_from_rfc3339(str).ok())
+                        .map(|dt| dt.with_timezone(&Local))
+                    {
                         planning.push_str("DEADLINE: ");
-                        planning.push('<');
-                        planning.push_str(due);
-                        planning.push('>');
+                        planning.push_str(&Timestamp::from(*due).to_org_string());
                     }
                 }
                 if let Some(title) = &task.0.title {

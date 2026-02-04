@@ -1,39 +1,51 @@
-use std::fmt::Debug;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+};
 
-use orgize::Org;
+use orgize::{
+    ast::{Headline, Token},
+    export::{from_fn, Container, Event},
+    Org,
+};
 
 pub(crate) mod calendar;
 pub(crate) mod tasklist;
+pub(crate) mod timestamp;
 
 pub(crate) trait ToOrg {
-    fn to_org(&self) -> Org<'static> {
-        Org::parse_string(self.to_org_string())
+    fn to_org(&self) -> Org {
+        Org::parse(self.to_org_string())
     }
     fn to_org_string(&self) -> String {
         let org = self.to_org();
-        let mut str = Vec::new();
-        let _ = org.write_org(&mut str);
-        String::from_utf8(str).expect("Failed to convert org to String")
+        org.to_org()
     }
 }
 
 impl ToOrg for String {
-    fn to_org(&self) -> Org<'static> {
-        Org::parse_string(self.to_owned())
+    fn to_org(&self) -> Org {
+        Org::parse(self)
+    }
+
+    fn to_org_string(&self) -> String {
+        self.clone()
     }
 }
 
 impl ToOrg for &str {
-    fn to_org(&self) -> Org<'static> {
-        Org::parse_string((*self).to_owned())
+    fn to_org(&self) -> Org {
+        Org::parse(*self)
+    }
+
+    fn to_org_string(&self) -> String {
+        (*self).to_owned()
     }
 }
 
-impl ToOrg for Org<'_> {
+impl ToOrg for Org {
     fn to_org_string(&self) -> String {
-        let mut str = Vec::new();
-        let _ = self.write_org(&mut str);
-        String::from_utf8(str).expect("Failed to convert org to String")
+        self.to_org()
     }
 }
 
@@ -76,4 +88,79 @@ macro_rules! def_org_meta {
     };
 }
 
-pub(self) use def_org_meta;
+use def_org_meta;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MaybeIdMap {
+    fresh: HashSet<Headline>,
+    map: HashMap<Token, Headline>,
+}
+
+impl MaybeIdMap {
+    fn insert(&mut self, id: Option<Token>, v: Headline) -> Option<Headline> {
+        match id {
+            Some(id) => self.map.insert(id, v),
+            None => self.fresh.replace(v),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.fresh.len() + self.map.len()
+    }
+
+    pub(crate) fn map(&self) -> &HashMap<Token, Headline> {
+        &self.map
+    }
+
+    #[allow(unused)]
+    pub(crate) fn map_mut(&mut self) -> &mut HashMap<Token, Headline> {
+        &mut self.map
+    }
+
+    #[allow(unused)]
+    pub(crate) fn into_map(self) -> HashMap<Token, Headline> {
+        self.map
+    }
+
+    pub(crate) fn fresh(&self) -> impl Iterator<Item = &Headline> {
+        self.fresh.iter()
+    }
+
+    pub(crate) fn diff(
+        mut self,
+        mut other: MaybeIdMap,
+    ) -> (MaybeIdMap, MaybeIdMap, HashMap<Token, Headline>) {
+        let intersection = self
+            .map
+            .keys()
+            .filter(|k| other.map.contains_key(*k))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed: HashMap<Token, Headline> = intersection
+            .into_iter()
+            .filter_map(|k| {
+                let old = self.map.remove(&k).unwrap();
+                let new = other.map.remove(&k).unwrap();
+                (old.raw().trim() != new.raw().trim()).then_some((k, new))
+            })
+            .collect();
+
+        let _ = other.fresh.extract_if(|h| self.fresh.remove(h));
+
+        (self, other, changed)
+    }
+}
+
+impl From<&Org> for MaybeIdMap {
+    fn from(org: &Org) -> Self {
+        let mut map = MaybeIdMap::default();
+        let mut handler = from_fn(|event| {
+            if let Event::Enter(Container::Headline(headline)) = event {
+                let id = headline.properties().and_then(|drawer| drawer.get("id"));
+                map.insert(id, headline);
+            }
+        });
+        org.traverse(&mut handler);
+        map
+    }
+}
