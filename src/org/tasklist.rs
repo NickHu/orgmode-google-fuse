@@ -11,7 +11,7 @@ use orgize::ast::Headline;
 
 use crate::org::timestamp::Timestamp;
 
-use super::{def_org_meta, ByETag, Id, ToOrg};
+use super::{def_org_meta, text_from_property_drawer, ByETag, Id, ToOrg};
 
 impl PartialEq for ByETag<Task> {
     fn eq(&self, other: &Self) -> bool {
@@ -96,14 +96,6 @@ impl OrgTaskList {
                 .deadline()
                 .and_then(|p| p.start_to_chrono())
                 .map(|dt| dt.and_local_timezone(Local).unwrap().to_rfc3339()),
-            etag: headline
-                .properties()
-                .and_then(|drawer| drawer.get("etag"))
-                .map(|t| t.as_ref().to_owned()),
-            id: headline
-                .properties()
-                .and_then(|drawer| drawer.get("id"))
-                .map(|t| t.as_ref().to_owned()),
             notes: headline.section().map(|s| s.raw().trim().to_owned()),
             status: if headline.is_done() {
                 Some("completed".to_owned())
@@ -111,6 +103,8 @@ impl OrgTaskList {
                 Some("needsAction".to_owned())
             },
             title: Some(headline.title_raw()),
+            etag: text_from_property_drawer!(headline, "etag"),
+            id: text_from_property_drawer!(headline, "id"),
             ..Task::default()
         }
     }

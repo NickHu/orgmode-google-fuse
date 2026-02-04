@@ -459,7 +459,58 @@ impl Filesystem for OrgFS {
                             .find(|(ino, _)| ino == &i)
                             .map(|(_, cal)| cal)
                             .expect("Calendar file not found during fsync");
-                        tracing::debug!("Calendar fsync not yet implemented: {:?}", orgcal);
+                        let meta = orgcal.meta();
+                        let calendar_id = meta.calendar().id.as_ref().unwrap();
+
+                        let mut did_write = false;
+                        for headline in added.fresh() {
+                            let event = OrgCalendar::parse_event(headline);
+                            tracing::info!("Adding new event: {:?}", event);
+                            self.tx_wcmd
+                                .send(WriteCommand::InsertCalendarEvent {
+                                    calendar_id: calendar_id.clone(),
+                                    event,
+                                })
+                                .expect("Failed to send InsertCalendarEvent command");
+                            did_write = true;
+                        }
+                        for (id, updated) in changed {
+                            let event = OrgCalendar::parse_event(&updated);
+                            tracing::info!("Modifying event with id {:?}: {:?}", id, event);
+                            self.tx_wcmd
+                                .send(WriteCommand::PatchCalendarEvent {
+                                    calendar_id: calendar_id.clone(),
+                                    event_id: id.to_string(),
+                                    event,
+                                })
+                                .expect("Failed to send UpdateCalendarEvent command");
+                            did_write = true;
+                        }
+                        for id in removed.map().keys() {
+                            tracing::info!("Removing event with id {:?}", id);
+                            self.tx_wcmd
+                                .send(WriteCommand::DeleteCalendarEvent {
+                                    calendar_id: calendar_id.clone(),
+                                    event_id: id.to_string(),
+                                })
+                                .expect("Failed to send DeleteCalendarEvent command");
+                            did_write = true;
+                        }
+
+                        tracing::debug!("Updating cached Org for ino: {}", ino);
+                        *org = new_org;
+                        if did_write {
+                            self.tx_wcmd
+                                .send(WriteCommand::SyncCalendar {
+                                    calendar_id: calendar_id.clone(),
+                                })
+                                .expect("Failed to send SyncCalendar command");
+                        } else {
+                            tracing::debug!(
+                                "No changes detected during fsync for calendar {}",
+                                calendar_id
+                            );
+                        }
                     }
                     i if self.is_tasks_file(i) => {
                         let orgtask = self
@@ -680,6 +731,7 @@ impl Filesystem for OrgFS {
     }
 
     fn open(&mut self, req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+        tracing::debug!("open ino: {}, pid: {}", ino, req.pid());
         let fh = self.allocate_stateful_file_handle(ino, req.pid());
         reply.opened(fh, 0);
     }

@@ -8,10 +8,11 @@ use chrono_tz::Tz;
 use evmap::{ReadHandleFactory, WriteHandle};
 use google_calendar3::api::{CalendarListEntry, Event, EventDateTime, Events};
 use itertools::Itertools;
+use orgize::ast::Headline;
 
 use crate::org::timestamp::Timestamp;
 
-use super::{def_org_meta, ByETag, Id, ToOrg};
+use super::{def_org_meta, text_from_property_drawer, ByETag, Id, ToOrg};
 
 impl PartialEq for ByETag<Event> {
     fn eq(&self, other: &Self) -> bool {
@@ -76,6 +77,59 @@ impl OrgCalendar {
             }
         }
         guard.refresh();
+    }
+
+    pub fn delete_id(&self, id: &str) {
+        let mut guard = self.1.lock().unwrap();
+        tracing::debug!("Deleting event: {id}");
+        guard.empty(id.to_owned());
+        guard.refresh();
+    }
+
+    pub fn parse_event(headline: &Headline) -> Event {
+        Event {
+            description: headline.section().map(|s| s.raw().trim().to_owned()),
+            end: headline.scheduled().and_then(|p| {
+                let dt = p.end_to_chrono()?;
+                if p.hour_end().is_some() {
+                    Some(EventDateTime {
+                        date: None,
+                        date_time: Some(dt.and_utc()),
+                        time_zone: iana_time_zone::get_timezone().ok(),
+                    })
+                } else {
+                    Some(EventDateTime {
+                        date: Some(dt.date()),
+                        date_time: None,
+                        time_zone: None,
+                    })
+                }
+            }),
+            start: headline.scheduled().and_then(|p| {
+                let dt = p.start_to_chrono()?;
+                if p.hour_start().is_some() {
+                    Some(EventDateTime {
+                        date: None,
+                        date_time: Some(dt.and_utc()),
+                        time_zone: iana_time_zone::get_timezone().ok(),
+                    })
+                } else {
+                    Some(EventDateTime {
+                        date: Some(dt.date()),
+                        date_time: None,
+                        time_zone: None,
+                    })
+                }
+            }),
+            summary: Some(headline.title_raw()),
+            color_id: text_from_property_drawer!(headline, "color_id"),
+            etag: text_from_property_drawer!(headline, "etag"),
+            id: text_from_property_drawer!(headline, "id"),
+            location: text_from_property_drawer!(headline, "location"),
+            status: text_from_property_drawer!(headline, "status"),
+            transparency: text_from_property_drawer!(headline, "transparency"),
+            ..Event::default()
+        }
     }
 }
 
@@ -148,7 +202,7 @@ impl ToOrg for OrgCalendar {
                 // HEADLINE
                 let mut str = "* ".to_owned();
                 if let Some(summary) = &event.0.summary {
-                    str.push_str(summary);
+                    str.push_str(summary.trim());
                 } else {
                     str.push_str("Untitled Event");
                 }
@@ -157,7 +211,7 @@ impl ToOrg for OrgCalendar {
                     (Some(start), Some(end)) => {
                         str.push_str(
                             format!(
-                                "{}--{}\n",
+                                "SCHEDULED: {}--{}\n",
                                 Timestamp::from(start.clone()).to_org_string(),
                                 Timestamp::from(end.clone()).to_org_string()
                             )

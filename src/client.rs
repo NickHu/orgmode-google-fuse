@@ -11,7 +11,7 @@ use google_tasks1::{
 
 use crate::oauth::APPLICATION_SECRET;
 
-type SyncToken = String;
+pub(super) type SyncToken = String;
 
 pub(crate) struct GoogleClient {
     calendarhub: CalendarHub<HttpsConnector<HttpConnector>>,
@@ -119,6 +119,38 @@ impl GoogleClient {
             .map(|(_res, event)| event)
     }
 
+    pub async fn insert_event(&self, calendar_id: &str, event: Event) -> Result<Event> {
+        self.calendarhub
+            .events()
+            .insert(event, calendar_id)
+            .doit()
+            .await
+            .map(|(_res, event)| event)
+    }
+
+    pub async fn patch_event(
+        &self,
+        calendar_id: &str,
+        event_id: &str,
+        event: Event,
+    ) -> Result<Event> {
+        self.calendarhub
+            .events()
+            .patch(event, calendar_id, event_id)
+            .doit()
+            .await
+            .map(|(_res, event)| event)
+    }
+
+    pub async fn delete_event(&self, calendar_id: &str, event_id: &str) -> Result<()> {
+        self.calendarhub
+            .events()
+            .delete(calendar_id, event_id)
+            .doit()
+            .await
+            .map(|_res| ())
+    }
+
     pub async fn list_tasklists(&self) -> Result<TaskLists> {
         self.taskshub
             .tasklists()
@@ -141,6 +173,9 @@ impl GoogleClient {
         self.taskshub
             .tasks()
             .list(tasklist_id)
+            .max_results(100)
+            .show_deleted(false)
+            .show_hidden(false)
             .doit()
             .await
             .map(|(_res, tasks)| tasks)
@@ -200,5 +235,21 @@ pub(crate) enum WriteCommand {
     },
     SyncTasklist {
         tasklist_id: String,
+    },
+    InsertCalendarEvent {
+        calendar_id: String,
+        event: Event,
+    },
+    PatchCalendarEvent {
+        calendar_id: String,
+        event_id: String,
+        event: Event,
+    },
+    DeleteCalendarEvent {
+        calendar_id: String,
+        event_id: String,
+    },
+    SyncCalendar {
+        calendar_id: String,
     },
 }

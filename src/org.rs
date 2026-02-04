@@ -164,3 +164,14 @@ impl From<&Org> for MaybeIdMap {
         map
     }
 }
+
+macro_rules! text_from_property_drawer {
+    ($headline:ident, $field:literal) => {
+        $headline
+            .properties()
+            .and_then(|drawer| drawer.get($field))
+            .map(|t| t.as_ref().to_owned())
+    };
+}
+
+use text_from_property_drawer;

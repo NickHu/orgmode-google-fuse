@@ -8,7 +8,10 @@ use fuse::OrgFS;
 use fuser::MountOption;
 use futures::{stream, StreamExt};
 
-use crate::{client::WriteCommand, org::tasklist::OrgTaskList};
+use crate::{
+    client::WriteCommand,
+    org::{calendar::OrgCalendar, tasklist::OrgTaskList},
+};
 
 mod client;
 mod fuse;
@@ -37,7 +40,7 @@ async fn main() -> std::io::Result<()> {
     let client = Arc::new(client::GoogleClient::new().await);
 
     let cl = client.list_calendars().await.unwrap();
-    let mut sync_tokens = Arc::new(tokio::sync::Mutex::new(Vec::default()));
+    let sync_tokens = Arc::new(tokio::sync::Mutex::new(Vec::default()));
     let calendars = Arc::new(
         stream::iter(cl.items.unwrap_or_default().into_iter())
             .filter_map(|cal| async {
@@ -82,69 +85,15 @@ async fn main() -> std::io::Result<()> {
     // spawn background task to poll for calendars updates
     tokio::spawn({
         let client = client.clone();
+        let calendars = calendars.clone();
+        let mut sync_tokens = sync_tokens.clone();
         async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
             loop {
                 interval.tick().await;
-                tracing::info!("Polling for calendar updates…");
-                let new_sync_tokens = Arc::new(tokio::sync::Mutex::new(Vec::default()));
-                {
-                    stream::iter(sync_tokens.lock().await.iter())
-                        .filter_map(|(id, sync_token)| async {
-                            calendars
-                                .iter()
-                                .find(|x| x.meta().calendar().id.as_ref() == Some(id))
-                                .map(|x| (x, id.clone(), sync_token.clone()))
-                        })
-                        .for_each(|(org_calendar, id, sync_token)| {
-                            let client = client.clone();
-                            let new_sync_tokens = new_sync_tokens.clone();
-                            async move {
-                                let events = match sync_token {
-                                    Some(sync_token) => {
-                                        tracing::debug!(
-                                            "Syncing calendar {} with token {}",
-                                            id,
-                                            sync_token
-                                        );
-                                        match client
-                                            .list_events_with_sync_token(id.as_ref(), &sync_token)
-                                            .await
-                                        {
-                                            Ok(events) => events,
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    "Failed to list events for calendar {}: {}",
-                                                    id,
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        tracing::debug!("Syncing calendar {} without token", id);
-                                        match client.list_events(id.as_ref()).await {
-                                            Ok(events) => events,
-                                            Err(e) => {
-                                                tracing::error!(
-                                                    "Failed to list events for calendar {}: {}",
-                                                    id,
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    }
-                                };
-                                let new_sync_token = events.next_sync_token.as_ref().cloned();
-                                org_calendar.sync(events);
-                                new_sync_tokens.lock().await.push((id, new_sync_token));
-                            }
-                        })
-                        .await;
+                if let Err(e) = update_calendars(&client, &calendars, &mut sync_tokens).await {
+                    tracing::error!("Failed to update calendars: {:?}", e);
                 }
-                sync_tokens = new_sync_tokens;
             }
         }
     });
@@ -251,6 +200,49 @@ async fn main() -> std::io::Result<()> {
                             .await
                             .expect("Failed to sync tasks");
                     }
+                    WriteCommand::InsertCalendarEvent { calendar_id, event } => {
+                        client
+                            .insert_event(&calendar_id, event)
+                            .await
+                            .expect("Failed to insert calendar event");
+                    },
+                    WriteCommand::PatchCalendarEvent { calendar_id, event_id, event } => {
+                        client
+                            .patch_event(&calendar_id, &event_id, event)
+                            .await
+                            .expect("Failed to patch calendar event");
+                    },
+                    WriteCommand::DeleteCalendarEvent { calendar_id, event_id } => {
+                        client
+                            .delete_event(&calendar_id, &event_id)
+                            .await
+                            .expect("Failed to delete calendar event");
+                        // the server won't tell us about the deletion, so manually remove it here
+                        let calendar = calendars
+                            .iter()
+                            .find(|cal| cal.meta().calendar().id.as_ref() == Some(&calendar_id))
+                            .expect("Calendar not found");
+                        calendar.delete_id(&event_id);
+                    },
+                    WriteCommand::SyncCalendar { calendar_id } => {
+                        let calendar = calendars
+                            .iter()
+                            .find(|cal| cal.meta().calendar().id.as_ref() == Some(&calendar_id))
+                            .expect("Calendar not found");
+                        let mut guard = sync_tokens.lock().await;
+                        let sync_token = guard
+                            .iter_mut()
+                            .find(|(id, _)| id == &calendar_id)
+                            .and_then(|(_, token)| token.as_mut());
+                        // give fsync, file close some time to settle
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let next_sync_token = update_calendar(&client, calendar, sync_token.as_deref())
+                            .await
+                            .expect("Failed to sync calendar");
+                        if let (Some(sync_token), Some(next_sync_token)) = (sync_token, next_sync_token) {
+                            *sync_token = next_sync_token;
+                        }
+                    },
                 }
             }
         } => {
@@ -295,4 +287,56 @@ async fn update_tasklist(
         .unwrap_or(std::time::UNIX_EPOCH);
     org_tasklist.sync(tasks, updated);
     Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+async fn update_calendars(
+    client: &client::GoogleClient,
+    calendars: &[OrgCalendar],
+    sync_tokens: &mut Arc<tokio::sync::Mutex<Vec<(String, Option<client::SyncToken>)>>>,
+) -> google_calendar3::Result<()> {
+    let new_sync_tokens = Arc::new(tokio::sync::Mutex::new(Vec::default()));
+    {
+        tracing::info!("Polling for calendar updates…");
+        for org_calendar in calendars {
+            let meta = org_calendar.meta();
+            let cal_id = meta.calendar().id.as_ref().expect("calendar with no id");
+            let guard = sync_tokens.lock().await;
+            let sync_token = guard
+                .iter()
+                .find(|(id, _)| id == cal_id)
+                .and_then(|(_, token)| token.as_ref());
+            let new_sync_token = update_calendar(client, org_calendar, sync_token).await?;
+            new_sync_tokens
+                .lock()
+                .await
+                .push((cal_id.clone(), new_sync_token));
+        }
+    }
+    *sync_tokens = new_sync_tokens;
+    Ok(())
+}
+
+async fn update_calendar(
+    client: &client::GoogleClient,
+    org_calendar: &OrgCalendar,
+    sync_token: Option<&client::SyncToken>,
+) -> google_calendar3::Result<Option<client::SyncToken>> {
+    let meta = org_calendar.meta();
+    let cal_id = meta.calendar().id.as_ref().expect("calendar with no id");
+    let events = match sync_token {
+        Some(sync_token) => {
+            tracing::info!("Syncing calendar {} with token {}", cal_id, sync_token);
+            client
+                .list_events_with_sync_token(cal_id.as_ref(), sync_token)
+                .await?
+        }
+        _ => {
+            tracing::info!("Syncing calendar {} without token", cal_id);
+            client.list_events(cal_id.as_ref()).await?
+        }
+    };
+    let next_sync_token = events.next_sync_token.as_ref().cloned();
+    org_calendar.sync(events);
+    Ok(next_sync_token)
 }
