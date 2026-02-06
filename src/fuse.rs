@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,8 +14,11 @@ use libc::{EBADF, EINVAL, ENOENT, ENOTDIR};
 use orgize::Org;
 
 use crate::{
-    client::WriteCommand,
-    org::{calendar::OrgCalendar, tasklist::OrgTaskList, MaybeIdMap},
+    client::{
+        CalendarEventInsert, CalendarEventModify, CalendarEventWrite, TaskInsert, TaskModify,
+        TaskWrite, WriteCommand,
+    },
+    org::{calendar::OrgCalendar, tasklist::OrgTaskList, MaybeIdMap, MetaPendingContainer},
 };
 use crate::{org::ToOrg, Pid};
 
@@ -239,7 +242,7 @@ impl OrgFS {
                             self.gid,
                             i,
                             cal.to_org_string().len() as u64,
-                            *cal.meta().updated(),
+                            cal.with_meta(|m| m.updated().load(Ordering::Acquire)),
                         )
                     })
             }
@@ -253,7 +256,7 @@ impl OrgFS {
                             self.gid,
                             i,
                             tl.to_org_string().len() as u64,
-                            *tl.meta().updated(),
+                            tl.with_meta(|m| m.updated().load(Ordering::Acquire)),
                         )
                     })
             }
@@ -272,38 +275,40 @@ impl Filesystem for OrgFS {
             },
             CALENDAR_DIR_INO => name.to_str().and_then(|filename| {
                 self.calendars.iter().find_map(|(ino, cal)| {
-                    cal.meta()
-                        .calendar()
-                        .summary
-                        .as_ref()
-                        .filter(|summary| format!("{}.org", summary) == filename)
-                        .map(|_| {
-                            file_attr(
-                                self.uid,
-                                self.gid,
-                                *ino,
-                                cal.to_org_string().len() as u64,
-                                *cal.meta().updated(),
-                            )
-                        })
+                    cal.with_meta(|m| {
+                        m.calendar()
+                            .summary
+                            .as_ref()
+                            .filter(|summary| format!("{}.org", summary) == filename)
+                            .map(|_| {
+                                file_attr(
+                                    self.uid,
+                                    self.gid,
+                                    *ino,
+                                    cal.to_org_string().len() as u64,
+                                    cal.with_meta(|m| m.updated().load(Ordering::Acquire)),
+                                )
+                            })
+                    })
                 })
             }),
             TASKS_DIR_INO => name.to_str().and_then(|filename| {
                 self.tasklists.iter().find_map(|(ino, tl)| {
-                    tl.meta()
-                        .tasklist()
-                        .title
-                        .as_ref()
-                        .filter(|title| format!("{}.org", title) == filename)
-                        .map(|_| {
-                            file_attr(
-                                self.uid,
-                                self.gid,
-                                *ino,
-                                tl.to_org_string().len() as u64,
-                                *tl.meta().updated(),
-                            )
-                        })
+                    tl.with_meta(|m| {
+                        m.tasklist()
+                            .title
+                            .as_ref()
+                            .filter(|title| format!("{}.org", title) == filename)
+                            .map(|_| {
+                                file_attr(
+                                    self.uid,
+                                    self.gid,
+                                    *ino,
+                                    tl.to_org_string().len() as u64,
+                                    tl.with_meta(|m| m.updated().load(Ordering::Acquire)),
+                                )
+                            })
+                    })
                 })
             }),
             _ => None,
@@ -459,58 +464,66 @@ impl Filesystem for OrgFS {
                             .find(|(ino, _)| ino == &i)
                             .map(|(_, cal)| cal)
                             .expect("Calendar file not found during fsync");
-                        let meta = orgcal.meta();
-                        let calendar_id = meta.calendar().id.as_ref().unwrap();
+                        orgcal.with_meta(|meta| {
+                            let calendar_id = meta.calendar().id.as_ref().unwrap();
 
-                        let mut did_write = false;
-                        for headline in added.fresh() {
-                            let event = OrgCalendar::parse_event(headline);
-                            tracing::info!("Adding new event: {:?}", event);
-                            self.tx_wcmd
-                                .send(WriteCommand::InsertCalendarEvent {
-                                    calendar_id: calendar_id.clone(),
-                                    event,
-                                })
-                                .expect("Failed to send InsertCalendarEvent command");
-                            did_write = true;
-                        }
-                        for (id, updated) in changed {
-                            let event = OrgCalendar::parse_event(&updated);
-                            tracing::info!("Modifying event with id {:?}: {:?}", id, event);
-                            self.tx_wcmd
-                                .send(WriteCommand::PatchCalendarEvent {
-                                    calendar_id: calendar_id.clone(),
-                                    event_id: id.to_string(),
-                                    event,
-                                })
-                                .expect("Failed to send UpdateCalendarEvent command");
-                            did_write = true;
-                        }
-                        for id in removed.map().keys() {
-                            tracing::info!("Removing event with id {:?}", id);
-                            self.tx_wcmd
-                                .send(WriteCommand::DeleteCalendarEvent {
-                                    calendar_id: calendar_id.clone(),
-                                    event_id: id.to_string(),
-                                })
-                                .expect("Failed to send DeleteCalendarEvent command");
-                            did_write = true;
-                        }
+                            let mut did_write = false;
+                            for headline in added.fresh() {
+                                let event = OrgCalendar::parse_event(headline).into();
+                                tracing::info!("Adding new event: {:?}", event);
+                                self.tx_wcmd
+                                    .send(WriteCommand::CalendarEvent {
+                                        calendar_id: calendar_id.clone(),
+                                        cmd: CalendarEventWrite::Insert(
+                                            CalendarEventInsert::Insert { event },
+                                        ),
+                                    })
+                                    .expect("Failed to send InsertCalendarEvent command");
+                                did_write = true;
+                            }
+                            for (id, updated) in changed {
+                                let event = OrgCalendar::parse_event(&updated).into();
+                                tracing::info!("Modifying event with id {:?}: {:?}", id, event);
+                                self.tx_wcmd
+                                    .send(WriteCommand::CalendarEvent {
+                                        calendar_id: calendar_id.clone(),
+                                        cmd: CalendarEventWrite::Modify {
+                                            event_id: id.to_string(),
+                                            modification: CalendarEventModify::Patch { event },
+                                        },
+                                    })
+                                    .expect("Failed to send UpdateCalendarEvent command");
+                                did_write = true;
+                            }
+                            for id in removed.map().keys() {
+                                tracing::info!("Removing event with id {:?}", id);
+                                self.tx_wcmd
+                                    .send(WriteCommand::CalendarEvent {
+                                        calendar_id: calendar_id.clone(),
+                                        cmd: CalendarEventWrite::Modify {
+                                            event_id: id.to_string(),
+                                            modification: CalendarEventModify::Delete,
+                                        },
+                                    })
+                                    .expect("Failed to send DeleteCalendarEvent command");
+                                did_write = true;
+                            }
 
-                        tracing::debug!("Updating cached Org for ino: {}", ino);
-                        *org = new_org;
-                        if did_write {
-                            self.tx_wcmd
-                                .send(WriteCommand::SyncCalendar {
-                                    calendar_id: calendar_id.clone(),
-                                })
-                                .expect("Failed to send SyncCalendar command");
-                        } else {
-                            tracing::debug!(
-                                "No changes detected during fsync for calendar {}",
-                                calendar_id
-                            );
-                        }
+                            tracing::debug!("Updating cached Org for ino: {}", ino);
+                            *org = new_org;
+                            if did_write {
+                                // self.tx_wcmd
+                                //     .send(WriteCommand::SyncCalendar {
+                                //         calendar_id: calendar_id.clone(),
+                                //     })
+                                //     .expect("Failed to send SyncCalendar command");
+                            } else {
+                                tracing::debug!(
+                                    "No changes detected during fsync for calendar {}",
+                                    calendar_id
+                                );
+                            }
+                        });
                     }
                     i if self.is_tasks_file(i) => {
                         let orgtask = self
@@ -519,58 +532,64 @@ impl Filesystem for OrgFS {
                             .find(|(ino, _)| ino == &i)
                             .map(|(_, tl)| tl)
                             .expect("Tasklist file not found during fsync");
-                        let meta = orgtask.meta();
-                        let tasklist_id = meta.tasklist().id.as_ref().unwrap();
+                        orgtask.with_meta(|meta| {
+                            let tasklist_id = meta.tasklist().id.as_ref().unwrap();
 
-                        let mut did_write = false;
-                        for headline in added.fresh() {
-                            let task = OrgTaskList::parse_task(headline);
-                            tracing::info!("Adding new task: {:?}", task);
-                            self.tx_wcmd
-                                .send(WriteCommand::InsertTask {
-                                    tasklist_id: tasklist_id.clone(),
-                                    task,
-                                })
-                                .expect("Failed to send InsertTask command");
-                            did_write = true;
-                        }
-                        for (id, updated) in changed {
-                            let task = OrgTaskList::parse_task(&updated);
-                            tracing::info!("Modifying task with id {:?}: {:?}", id, task);
-                            self.tx_wcmd
-                                .send(WriteCommand::PatchTask {
-                                    tasklist_id: tasklist_id.clone(),
-                                    task_id: id.to_string(),
-                                    task,
-                                })
-                                .expect("Failed to send UpdateTask command");
-                            did_write = true;
-                        }
-                        for id in removed.map().keys() {
-                            tracing::info!("Removing task with id {:?}", id);
-                            self.tx_wcmd
-                                .send(WriteCommand::DeleteTask {
-                                    tasklist_id: tasklist_id.clone(),
-                                    task_id: id.to_string(),
-                                })
-                                .expect("Failed to send DeleteTask command");
-                            did_write = true;
-                        }
+                            let mut did_write = false;
+                            for headline in added.fresh() {
+                                let task = OrgTaskList::parse_task(headline).into();
+                                tracing::info!("Adding new task: {:?}", task);
+                                self.tx_wcmd
+                                    .send(WriteCommand::Task {
+                                        tasklist_id: tasklist_id.clone(),
+                                        cmd: TaskWrite::Insert(TaskInsert::Insert { task }),
+                                    })
+                                    .expect("Failed to send InsertTask command");
+                                did_write = true;
+                            }
+                            for (id, updated) in changed {
+                                let task = OrgTaskList::parse_task(&updated).into();
+                                tracing::info!("Modifying task with id {:?}: {:?}", id, task);
+                                self.tx_wcmd
+                                    .send(WriteCommand::Task {
+                                        tasklist_id: tasklist_id.clone(),
+                                        cmd: TaskWrite::Modify {
+                                            task_id: id.to_string(),
+                                            modification: TaskModify::Patch { task },
+                                        },
+                                    })
+                                    .expect("Failed to send UpdateTask command");
+                                did_write = true;
+                            }
+                            for id in removed.map().keys() {
+                                tracing::info!("Removing task with id {:?}", id);
+                                self.tx_wcmd
+                                    .send(WriteCommand::Task {
+                                        tasklist_id: tasklist_id.clone(),
+                                        cmd: TaskWrite::Modify {
+                                            task_id: id.to_string(),
+                                            modification: TaskModify::Delete,
+                                        },
+                                    })
+                                    .expect("Failed to send DeleteTask command");
+                                did_write = true;
+                            }
 
-                        tracing::debug!("Updating cached Org for ino: {}", ino);
-                        *org = new_org;
-                        if did_write {
-                            self.tx_wcmd
-                                .send(WriteCommand::SyncTasklist {
-                                    tasklist_id: tasklist_id.clone(),
-                                })
-                                .expect("Failed to send SyncTasklist command");
-                        } else {
-                            tracing::debug!(
-                                "No changes detected during fsync for tasklist {}",
-                                tasklist_id
-                            );
-                        }
+                            tracing::debug!("Updating cached Org for ino: {}", ino);
+                            *org = new_org;
+                            if did_write {
+                                // self.tx_wcmd
+                                //     .send(WriteCommand::SyncTasklist {
+                                //         tasklist_id: tasklist_id.clone(),
+                                //     })
+                                //     .expect("Failed to send SyncTasklist command");
+                            } else {
+                                tracing::debug!(
+                                    "No changes detected during fsync for tasklist {}",
+                                    tasklist_id
+                                );
+                            }
+                        });
                     }
                     _ => {}
                 }
@@ -660,66 +679,70 @@ impl Filesystem for OrgFS {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let entries = match ino {
-            ROOT_DIR_INO => {
-                vec![
-                    (ROOT_DIR_INO, FileType::Directory, ".".to_owned()),
-                    (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
-                    (
-                        CALENDAR_DIR_INO,
-                        FileType::Directory,
-                        "calendars".to_owned(),
-                    ),
-                    (TASKS_DIR_INO, FileType::Directory, "tasks".to_owned()),
-                ]
-            }
-            CALENDAR_DIR_INO => {
-                let mut entries = vec![
-                    (CALENDAR_DIR_INO, FileType::Directory, ".".to_owned()),
-                    (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
-                ];
-                entries.extend(
-                    self.calendars
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, (_, cal))| {
-                            cal.meta().calendar().summary.as_ref().map(|summary| {
-                                (
-                                    FILE_START_OFFSET + i as Inode,
-                                    FileType::RegularFile,
-                                    format!("{}.org", summary),
-                                )
+        let entries =
+            match ino {
+                ROOT_DIR_INO => {
+                    vec![
+                        (ROOT_DIR_INO, FileType::Directory, ".".to_owned()),
+                        (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
+                        (
+                            CALENDAR_DIR_INO,
+                            FileType::Directory,
+                            "calendars".to_owned(),
+                        ),
+                        (TASKS_DIR_INO, FileType::Directory, "tasks".to_owned()),
+                    ]
+                }
+                CALENDAR_DIR_INO => {
+                    let mut entries = vec![
+                        (CALENDAR_DIR_INO, FileType::Directory, ".".to_owned()),
+                        (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
+                    ];
+                    entries.extend(self.calendars.iter().enumerate().filter_map(
+                        |(i, (_, cal))| {
+                            cal.with_meta(|meta| {
+                                meta.calendar().summary.as_ref().map(|summary| {
+                                    (
+                                        FILE_START_OFFSET + i as Inode,
+                                        FileType::RegularFile,
+                                        format!("{}.org", summary),
+                                    )
+                                })
                             })
-                        }),
-                );
-                entries
-            }
-            TASKS_DIR_INO => {
-                let mut entries = vec![
-                    (TASKS_DIR_INO, FileType::Directory, ".".to_owned()),
-                    (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
-                ];
-                entries.extend(
-                    self.tasklists
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, (_, tl))| {
-                            tl.meta().tasklist().title.as_ref().map(|title| {
-                                (
-                                    FILE_START_OFFSET + self.calendars.len() as Inode + i as Inode,
-                                    FileType::RegularFile,
-                                    format!("{}.org", title),
-                                )
-                            })
-                        }),
-                );
-                entries
-            }
-            _ => {
-                reply.error(ENOTDIR);
-                return;
-            }
-        };
+                        },
+                    ));
+                    entries
+                }
+                TASKS_DIR_INO => {
+                    let mut entries = vec![
+                        (TASKS_DIR_INO, FileType::Directory, ".".to_owned()),
+                        (ROOT_DIR_INO, FileType::Directory, "..".to_owned()),
+                    ];
+                    entries.extend(
+                        self.tasklists
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, (_, tl))| {
+                                tl.with_meta(|meta| {
+                                    meta.tasklist().title.as_ref().map(|title| {
+                                        (
+                                            FILE_START_OFFSET
+                                                + self.calendars.len() as Inode
+                                                + i as Inode,
+                                            FileType::RegularFile,
+                                            format!("{}.org", title),
+                                        )
+                                    })
+                                })
+                            }),
+                    );
+                    entries
+                }
+                _ => {
+                    reply.error(ENOTDIR);
+                    return;
+                }
+            };
 
         for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
             // i + 1 means the index of the next entry

@@ -9,8 +9,11 @@ use fuser::MountOption;
 use futures::{stream, StreamExt};
 
 use crate::{
-    client::WriteCommand,
-    org::{calendar::OrgCalendar, tasklist::OrgTaskList},
+    client::{
+        CalendarEventInsert, CalendarEventModify, CalendarEventWrite, TaskInsert, TaskModify,
+        TaskWrite, WriteCommand,
+    },
+    org::{calendar::OrgCalendar, tasklist::OrgTaskList, MetaPendingContainer},
 };
 
 mod client;
@@ -158,82 +161,95 @@ async fn main() -> std::io::Result<()> {
         _ = async {
             while let Some(wcmd) = rx_wcmd.recv().await {
                 match wcmd {
-                    WriteCommand::InsertTask { tasklist_id, task } => {
-                        client
-                            .insert_task(&tasklist_id, task)
-                            .await
-                            .expect("Failed to insert task");
-                    }
-                    WriteCommand::PatchTask {
-                        tasklist_id,
-                        task_id,
-                        task,
-                    } => {
-                        client
-                            .patch_task(&tasklist_id, &task_id, task)
-                            .await
-                            .expect("Failed to patch task");
-                    }
-                    WriteCommand::DeleteTask {
-                        tasklist_id,
-                        task_id,
-                    } => {
-                        client
-                            .delete_task(&tasklist_id, &task_id)
-                            .await
-                            .expect("Failed to delete task");
-                        // the server won't tell us about the deletion, so manually remove it here
+                    WriteCommand::Task { tasklist_id, cmd } => {
                         let tasklist = tasklists
                             .iter()
-                            .find(|tl| tl.meta().tasklist().id.as_ref() == Some(&tasklist_id))
+                            .find(|tl| tl.with_meta(|m| m.tasklist().id.as_ref() == Some(&tasklist_id)))
                             .expect("Tasklist not found");
-                        tasklist.delete_id(&task_id);
+                        process_tasklist_write(&client, tasklist, cmd).await;
                     }
                     WriteCommand::SyncTasklist { tasklist_id } => {
                         let tasklist = tasklists
                             .iter()
-                            .find(|tl| tl.meta().tasklist().id.as_ref() == Some(&tasklist_id))
+                            .find(|tl| tl.with_meta(|m| m.tasklist().id.as_ref() == Some(&tasklist_id)))
                             .expect("Tasklist not found");
+
+                        // try to flush our pending writes
+                        if tasklist.with_pending(|p| !(p.0.is_empty() && p.1.is_empty())) {
+                            tracing::debug!("Flushing pending writes for tasklist {}", tasklist_id);
+                            let old_meta = tasklist.clear_pending();
+                            let pending = old_meta.pending();
+                            for insert in &pending.0 {
+                                process_tasklist_write(
+                                    &client,
+                                    tasklist,
+                                    TaskWrite::Insert(insert.clone()),
+                                )
+                                .await;
+                            }
+                            for (task_id, modification) in &pending.1 {
+                                process_tasklist_write(
+                                    &client,
+                                    tasklist,
+                                    TaskWrite::Modify {
+                                        task_id: task_id.clone(),
+                                        modification: modification.clone(),
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+
                         // give fsync, file close some time to settle
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         update_tasklist(&client, tasklist)
                             .await
                             .expect("Failed to sync tasks");
                     }
-                    WriteCommand::InsertCalendarEvent { calendar_id, event } => {
-                        client
-                            .insert_event(&calendar_id, event)
-                            .await
-                            .expect("Failed to insert calendar event");
-                    },
-                    WriteCommand::PatchCalendarEvent { calendar_id, event_id, event } => {
-                        client
-                            .patch_event(&calendar_id, &event_id, event)
-                            .await
-                            .expect("Failed to patch calendar event");
-                    },
-                    WriteCommand::DeleteCalendarEvent { calendar_id, event_id } => {
-                        client
-                            .delete_event(&calendar_id, &event_id)
-                            .await
-                            .expect("Failed to delete calendar event");
-                        // the server won't tell us about the deletion, so manually remove it here
+                    WriteCommand::CalendarEvent { calendar_id, cmd } => {
                         let calendar = calendars
                             .iter()
-                            .find(|cal| cal.meta().calendar().id.as_ref() == Some(&calendar_id))
+                            .find(|cal| cal.with_meta(|m| m.calendar().id.as_ref() == Some(&calendar_id)))
                             .expect("Calendar not found");
-                        calendar.delete_id(&event_id);
-                    },
+                        process_calendar_write(&client, calendar, cmd).await;
+                    }
                     WriteCommand::SyncCalendar { calendar_id } => {
                         let calendar = calendars
                             .iter()
-                            .find(|cal| cal.meta().calendar().id.as_ref() == Some(&calendar_id))
+                            .find(|cal| cal.with_meta(|m| m.calendar().id.as_ref() == Some(&calendar_id)))
                             .expect("Calendar not found");
                         let mut guard = sync_tokens.lock().await;
                         let sync_token = guard
                             .iter_mut()
                             .find(|(id, _)| id == &calendar_id)
                             .and_then(|(_, token)| token.as_mut());
+
+                        // try to flush our pending writes
+                        if calendar.with_pending(|p| !(p.0.is_empty() && p.1.is_empty())) {
+                            tracing::debug!("Flushing pending writes for calendar {}", calendar_id);
+                            let old_meta = calendar.clear_pending();
+                            let pending = old_meta.pending();
+                            for insert in &pending.0 {
+                                process_calendar_write(
+                                    &client,
+                                    calendar,
+                                    CalendarEventWrite::Insert(insert.clone()),
+                                )
+                                .await;
+                            }
+                            for (event_id, modification) in &pending.1 {
+                                process_calendar_write(
+                                    &client,
+                                    calendar,
+                                    CalendarEventWrite::Modify {
+                                        event_id: event_id.clone(),
+                                        modification: modification.clone(),
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+
                         // give fsync, file close some time to settle
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         let next_sync_token = update_calendar(&client, calendar, sync_token.as_deref())
@@ -242,7 +258,7 @@ async fn main() -> std::io::Result<()> {
                         if let (Some(sync_token), Some(next_sync_token)) = (sync_token, next_sync_token) {
                             *sync_token = next_sync_token;
                         }
-                    },
+                    }
                 }
             }
         } => {
@@ -270,12 +286,13 @@ async fn update_tasklist(
     client: &client::GoogleClient,
     org_tasklist: &OrgTaskList,
 ) -> google_tasks1::Result<()> {
-    let meta = org_tasklist.meta();
-    let tl_id = meta.tasklist().id.as_ref().expect("tasklist with no id");
+    let tl_id = org_tasklist
+        .with_meta(|m| m.tasklist().id.clone())
+        .expect("tasklist with no id");
     tracing::info!("Updating tasklist {}…", tl_id);
-    let tasks = client.list_tasks(tl_id).await?;
+    let tasks = client.list_tasks(&tl_id).await?;
     let updated = client
-        .get_tasklist(tl_id)
+        .get_tasklist(&tl_id)
         .await?
         .updated
         .as_ref()
@@ -289,6 +306,64 @@ async fn update_tasklist(
     Ok(())
 }
 
+async fn process_tasklist_write(
+    client: &client::GoogleClient,
+    tasklist: &OrgTaskList,
+    cmd: TaskWrite,
+) {
+    let tasklist_id = tasklist.with_meta(|m| m.tasklist().id.clone()).unwrap();
+    match cmd {
+        TaskWrite::Insert(TaskInsert::Insert { task }) => {
+            tracing::trace!("Inserting");
+            if let Ok(new) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client.insert_task(&tasklist_id, *task.clone()),
+            )
+            .await
+            .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+            {
+                tracing::trace!("Success");
+                let id = new
+                    .id
+                    .clone()
+                    .expect("Server returned inserted task with no id");
+                tracing::debug!("Inserted task with id: {}", id);
+                tasklist.add_id(&id, new);
+            } else {
+                tracing::error!("Failed to insert task; saving");
+                tasklist.push_pending_insert(TaskInsert::Insert { task });
+            }
+            tracing::trace!("Finish insert");
+        }
+        TaskWrite::Modify {
+            task_id,
+            modification: TaskModify::Patch { task },
+        } => {
+            if let Ok(new) = client
+                .patch_task(&tasklist_id, &task_id, *task.clone())
+                .await
+            {
+                tracing::debug!("Updated task with id: {}", task_id);
+                tasklist.update_id(&task_id, new);
+            } else {
+                tracing::error!("Failed to update task with id: {}; saving", task_id);
+                tasklist.push_pending_modify(task_id, TaskModify::Patch { task });
+            }
+        }
+        TaskWrite::Modify {
+            task_id,
+            modification: TaskModify::Delete,
+        } => {
+            if let Ok(()) = client.delete_task(&tasklist_id, &task_id).await {
+                tasklist.delete_id(&task_id);
+            } else {
+                tracing::error!("Failed to delete task with id: {}; saving", task_id);
+                tasklist.push_pending_modify(task_id, TaskModify::Delete);
+            }
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 async fn update_calendars(
     client: &client::GoogleClient,
@@ -299,12 +374,13 @@ async fn update_calendars(
     {
         tracing::info!("Polling for calendar updates…");
         for org_calendar in calendars {
-            let meta = org_calendar.meta();
-            let cal_id = meta.calendar().id.as_ref().expect("calendar with no id");
+            let cal_id = org_calendar
+                .with_meta(|m| m.calendar().id.clone())
+                .expect("calendar with no id");
             let guard = sync_tokens.lock().await;
             let sync_token = guard
                 .iter()
-                .find(|(id, _)| id == cal_id)
+                .find(|(id, _)| id == &cal_id)
                 .and_then(|(_, token)| token.as_ref());
             let new_sync_token = update_calendar(client, org_calendar, sync_token).await?;
             new_sync_tokens
@@ -322,8 +398,9 @@ async fn update_calendar(
     org_calendar: &OrgCalendar,
     sync_token: Option<&client::SyncToken>,
 ) -> google_calendar3::Result<Option<client::SyncToken>> {
-    let meta = org_calendar.meta();
-    let cal_id = meta.calendar().id.as_ref().expect("calendar with no id");
+    let cal_id = org_calendar
+        .with_meta(|m| m.calendar().id.clone())
+        .expect("calendar with no id");
     let events = match sync_token {
         Some(sync_token) => {
             tracing::info!("Syncing calendar {} with token {}", cal_id, sync_token);
@@ -337,6 +414,56 @@ async fn update_calendar(
         }
     };
     let next_sync_token = events.next_sync_token.as_ref().cloned();
-    org_calendar.sync(events);
+    let updated = events
+        .updated
+        .map(|dt| dt.into())
+        .unwrap_or(std::time::UNIX_EPOCH);
+    org_calendar.sync(events, updated);
     Ok(next_sync_token)
+}
+
+async fn process_calendar_write(
+    client: &client::GoogleClient,
+    calendar: &OrgCalendar,
+    cmd: CalendarEventWrite,
+) {
+    let calendar_id = calendar.with_meta(|m| m.calendar().id.clone()).unwrap();
+    match cmd {
+        CalendarEventWrite::Insert(CalendarEventInsert::Insert { event }) => {
+            if let Ok(new) = client.insert_event(&calendar_id, *event.clone()).await {
+                let id = new
+                    .id
+                    .clone()
+                    .expect("Server returned inserted event with no id");
+                tracing::debug!("Inserted event with id: {}", id);
+                calendar.add_id(&id, new);
+            } else {
+                calendar.push_pending_insert(CalendarEventInsert::Insert { event });
+            }
+        }
+        CalendarEventWrite::Modify {
+            event_id,
+            modification: CalendarEventModify::Patch { event },
+        } => {
+            if let Ok(new) = client
+                .patch_event(&calendar_id, &event_id, *event.clone())
+                .await
+            {
+                tracing::debug!("Updated event with id: {}", event_id);
+                calendar.update_id(&event_id, new);
+            } else {
+                calendar.push_pending_modify(event_id, CalendarEventModify::Patch { event });
+            }
+        }
+        CalendarEventWrite::Modify {
+            event_id,
+            modification: CalendarEventModify::Delete,
+        } => {
+            if let Ok(()) = client.delete_event(&calendar_id, &event_id).await {
+                calendar.delete_id(&event_id);
+            } else {
+                calendar.push_pending_modify(event_id, CalendarEventModify::Delete);
+            }
+        }
+    }
 }

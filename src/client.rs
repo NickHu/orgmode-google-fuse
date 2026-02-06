@@ -1,5 +1,5 @@
 use google_calendar3::{
-    api::{Calendar, CalendarList, Event, Events},
+    api::{Calendar, CalendarList, Event, EventDateTime, Events},
     CalendarHub,
 };
 use google_tasks1::{
@@ -219,37 +219,151 @@ impl GoogleClient {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) enum WriteCommand {
-    InsertTask {
+    Task {
         tasklist_id: String,
-        task: Task,
-    },
-    PatchTask {
-        tasklist_id: String,
-        task_id: String,
-        task: Task,
-    },
-    DeleteTask {
-        tasklist_id: String,
-        task_id: String,
+        cmd: TaskWrite,
     },
     SyncTasklist {
         tasklist_id: String,
     },
-    InsertCalendarEvent {
+    CalendarEvent {
         calendar_id: String,
-        event: Event,
-    },
-    PatchCalendarEvent {
-        calendar_id: String,
-        event_id: String,
-        event: Event,
-    },
-    DeleteCalendarEvent {
-        calendar_id: String,
-        event_id: String,
+        cmd: CalendarEventWrite,
     },
     SyncCalendar {
         calendar_id: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TaskWrite {
+    Insert(TaskInsert),
+    Modify {
+        task_id: String,
+        modification: TaskModify,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TaskInsert {
+    Insert { task: Box<Task> },
+}
+
+impl PartialEq for TaskInsert {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TaskInsert::Insert { task: task1 }, TaskInsert::Insert { task: task2 }) => {
+                task1.completed == task2.completed
+                    && task1.due == task2.due
+                    && task1.notes == task2.notes
+                    && task1.status == task2.status
+                    && task1.title == task2.title
+            }
+        }
+    }
+}
+
+impl Eq for TaskInsert {}
+
+impl std::hash::Hash for TaskInsert {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            TaskInsert::Insert { task } => {
+                task.completed.hash(state);
+                task.due.hash(state);
+                task.notes.hash(state);
+                task.status.hash(state);
+                task.title.hash(state);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TaskModify {
+    Patch { task: Box<Task> },
+    Delete,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CalendarEventWrite {
+    Insert(CalendarEventInsert),
+    Modify {
+        event_id: String,
+        modification: CalendarEventModify,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CalendarEventInsert {
+    Insert { event: Box<Event> },
+}
+
+impl PartialEq for CalendarEventInsert {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                CalendarEventInsert::Insert { event: event1 },
+                CalendarEventInsert::Insert { event: event2 },
+            ) => {
+                fn eq_eventdatetime(x: &Option<EventDateTime>, y: &Option<EventDateTime>) -> bool {
+                    match (x, y) {
+                        (Some(x), Some(y)) => {
+                            x.date == y.date
+                                && x.date_time == y.date_time
+                                && x.time_zone == y.time_zone
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    }
+                }
+                event1.description == event2.description
+                    && eq_eventdatetime(&event1.end, &event2.end)
+                    && eq_eventdatetime(&event1.start, &event2.start)
+                    && event1.summary == event2.summary
+                    && event1.color_id == event2.color_id
+                    && event1.location == event2.location
+                    && event1.status == event2.status
+                    && event1.status == event2.transparency
+            }
+        }
+    }
+}
+
+impl Eq for CalendarEventInsert {}
+
+impl std::hash::Hash for CalendarEventInsert {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            CalendarEventInsert::Insert { event } => {
+                event.description.hash(state);
+                {
+                    let mut hash_eventdatetime = |x: &Option<EventDateTime>| {
+                        if let Some(x) = x {
+                            x.date.hash(state);
+                            x.date_time.hash(state);
+                            x.time_zone.hash(state);
+                        } else {
+                            None::<()>.hash(state);
+                        }
+                    };
+                    hash_eventdatetime(&event.end);
+                    hash_eventdatetime(&event.start);
+                }
+                event.summary.hash(state);
+                event.color_id.hash(state);
+                event.location.hash(state);
+                event.status.hash(state);
+                event.transparency.hash(state);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CalendarEventModify {
+    Patch { event: Box<Event> },
+    Delete,
 }
