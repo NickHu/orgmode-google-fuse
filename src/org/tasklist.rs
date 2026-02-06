@@ -1,15 +1,21 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::{
     hash::Hash,
     sync::{Arc, Mutex},
 };
 
+use atomic_time::AtomicSystemTime;
 use chrono::Local;
 use evmap::{ReadHandleFactory, WriteHandle};
 use google_tasks1::api::{Task, TaskList, Tasks};
 use orgize::ast::Headline;
 
+use crate::org::conflict::push_conflict_str;
 use crate::org::timestamp::Timestamp;
+use crate::org::MetaPendingContainer;
+use crate::write::{TaskInsert, TaskModify};
 
 use super::{def_org_meta, text_from_property_drawer, ByETag, Id, ToOrg};
 
@@ -29,20 +35,20 @@ impl Hash for ByETag<Task> {
 }
 
 def_org_meta! {
-    TaskListMeta { tasklist: TaskList, updated: SystemTime }
+    TaskListMeta {
+        tasklist: TaskList,
+        updated: AtomicSystemTime,
+        pending: (HashSet<TaskInsert>, HashMap<String, TaskModify>)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct OrgTaskList(
     ReadHandleFactory<Id, Box<ByETag<Task>>, TaskListMeta>,
     #[allow(clippy::type_complexity)] Arc<Mutex<WriteHandle<Id, Box<ByETag<Task>>, TaskListMeta>>>,
 );
 
 impl OrgTaskList {
-    pub fn meta(&self) -> TaskListMeta {
-        self.0.handle().meta().expect("meta not found").clone()
-    }
-
     pub fn sync(&self, ts: Tasks, updated: SystemTime) {
         let mut guard = self.1.lock().unwrap();
         for t in ts.items.unwrap_or_default() {
@@ -75,14 +81,11 @@ impl OrgTaskList {
                 guard.insert(id.clone(), Box::new(ByETag(t)));
             }
         }
-        guard.set_meta((self.meta().tasklist().clone(), updated).into());
-        guard.refresh();
-    }
-
-    pub fn delete_id(&self, id: &str) {
-        let mut guard = self.1.lock().unwrap();
-        tracing::debug!("Deleting task: {id}");
-        guard.empty(id.to_owned());
+        guard
+            .meta()
+            .unwrap()
+            .updated()
+            .store(updated, Ordering::Release);
         guard.refresh();
     }
 
@@ -110,9 +113,45 @@ impl OrgTaskList {
     }
 }
 
+impl MetaPendingContainer for OrgTaskList {
+    type Meta = TaskListMeta;
+    type Item = Task;
+    type Insert = TaskInsert;
+    type Modify = TaskModify;
+
+    fn with_meta<T>(&self, f: impl FnOnce(&Self::Meta) -> T) -> T {
+        f(&self.0.handle().meta().expect("meta not found"))
+    }
+
+    fn with_pending<T>(
+        &self,
+        f: impl FnOnce(&(HashSet<Self::Insert>, HashMap<Id, Self::Modify>)) -> T,
+    ) -> T {
+        self.with_meta(|m| f(m.pending()))
+    }
+
+    fn write(
+        &self,
+    ) -> std::sync::MutexGuard<'_, WriteHandle<Id, Box<ByETag<Self::Item>>, Self::Meta>> {
+        self.1.lock().unwrap()
+    }
+
+    fn update_pending(
+        meta: &Self::Meta,
+        pending: (HashSet<Self::Insert>, HashMap<Id, Self::Modify>),
+    ) -> Self::Meta {
+        (
+            meta.tasklist().clone(),
+            AtomicSystemTime::new(meta.updated().load(Ordering::Acquire)),
+            pending,
+        )
+            .into()
+    }
+}
+
 impl From<(TaskList, Tasks)> for OrgTaskList {
     fn from(ts: (TaskList, Tasks)) -> Self {
-        let updated =
+        let updated = AtomicSystemTime::new(
             ts.0.updated
                 .as_ref()
                 .and_then(|str| {
@@ -120,8 +159,9 @@ impl From<(TaskList, Tasks)> for OrgTaskList {
                         .ok()
                         .map(|x| x.into())
                 })
-                .unwrap_or(std::time::UNIX_EPOCH);
-        let (rh, mut wh) = evmap::with_meta((ts.0, updated).into());
+                .unwrap_or(std::time::UNIX_EPOCH),
+        );
+        let (rh, mut wh) = evmap::with_meta((ts.0, updated, Default::default()).into());
         wh.extend(ts.1.items.unwrap_or_default().into_iter().map(|task| {
             let id = task.id.clone().unwrap_or_default();
             (id, Box::new(ByETag(task)))
@@ -133,82 +173,118 @@ impl From<(TaskList, Tasks)> for OrgTaskList {
 
 impl ToOrg for OrgTaskList {
     fn to_org_string(&self) -> String {
-        self.0
-            .handle()
-            .map_into::<_, Vec<_>, _>(|id, tasks| {
+        let handle = self.0.handle();
+        let meta = handle.meta().expect("meta not found");
+        let pending = meta.pending();
+        [
+            handle.map_into::<_, Vec<_>, _>(|id, tasks| {
                 let task = tasks
                     .get_one()
                     .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
-                // HEADLINE
-                let mut str = "* ".to_owned();
-                let mut planning = String::new();
-                if let Some(done) = &task
-                    .0
-                    .completed
-                    .as_ref()
-                    .and_then(|str| chrono::DateTime::parse_from_rfc3339(str).ok())
-                    .map(|dt| dt.with_timezone(&Local))
-                {
-                    planning.push_str("CLOSED: ");
-                    planning.push_str(&Timestamp::from(*done).deactivate().to_org_string());
-                } else {
-                    str.push_str("TODO ");
-                    if let Some(due) = &task
-                        .0
-                        .due
-                        .as_ref()
-                        .and_then(|str| chrono::DateTime::parse_from_rfc3339(str).ok())
-                        .map(|dt| dt.with_timezone(&Local))
-                    {
-                        planning.push_str("DEADLINE: ");
-                        planning.push_str(&Timestamp::from(*due).to_org_string());
+                let mut str = String::new();
+                match pending.1.get(id) {
+                    Some(TaskModify::Patch { task: new_task }) => {
+                        push_conflict_str(
+                            &mut str,
+                            &render_task(&task.0, "* COMMENT".to_owned(), true),
+                            &render_task(new_task, "* ".to_owned(), false),
+                        );
                     }
+                    Some(TaskModify::Delete) => {
+                        push_conflict_str(
+                            &mut str,
+                            &render_task(&task.0, "* COMMENT".to_owned(), true),
+                            "",
+                        );
+                    }
+                    None => str.push_str(&render_task(&task.0, "* ".to_owned(), true)),
                 }
-                if let Some(title) = &task.0.title {
-                    str.push_str(title);
-                }
-                str.push('\n');
-
-                // PLANNING
-                if !planning.is_empty() {
-                    str.push_str(&planning);
-                    str.push('\n');
-                }
-
-                // PROPERTIES
-                str.push_str(":PROPERTIES:");
-                str.push('\n');
-                macro_rules! print_property {
-                    ($p:ident) => {
-                        if let Some($p) = &task.0.$p {
-                            str.push_str(":");
-                            str.push_str(stringify!($p));
-                            str.push_str(": ");
-                            str.push_str(&$p.to_org_string());
-                            str.push('\n');
-                        }
-                    };
-                }
-                print_property!(etag);
-                print_property!(id);
-                print_property!(updated);
-                print_property!(self_link);
-                print_property!(web_view_link);
-                if let Some(links) = &task.0.links {
-                    str.push_str(&format!(":links: {:?}", links));
-                    str.push('\n');
-                }
-                str.push_str(":END:\n");
-
-                // SECTION
-                if let Some(notes) = &task.0.notes {
-                    str.push('\n');
-                    str.push_str(notes);
-                    str.push('\n');
-                }
-
                 str
-            })
-            .join("\n")
+            }),
+            pending
+                .0
+                .iter()
+                .map(|TaskInsert::Insert { task }| {
+                    let mut str = String::new();
+                    push_conflict_str(&mut str, "", &render_task(task, "* ".to_owned(), false));
+                    str
+                })
+                .collect::<Vec<_>>(),
+        ]
+        .concat()
+        .join("\n")
     }
+}
+
+fn render_task(task: &Task, prefix: String, with_properties: bool) -> String {
+    // HEADLINE
+    let mut str = prefix;
+    let mut planning = String::new();
+    if let Some(done) = &task
+        .completed
+        .as_ref()
+        .and_then(|str| chrono::DateTime::parse_from_rfc3339(str).ok())
+        .map(|dt| dt.with_timezone(&Local))
+    {
+        planning.push_str("CLOSED: ");
+        planning.push_str(&Timestamp::from(*done).deactivate().to_org_string());
+    } else {
+        str.push_str("TODO ");
+        if let Some(due) = &task
+            .due
+            .as_ref()
+            .and_then(|str| chrono::DateTime::parse_from_rfc3339(str).ok())
+            .map(|dt| dt.with_timezone(&Local))
+        {
+            planning.push_str("DEADLINE: ");
+            planning.push_str(&Timestamp::from(*due).to_org_string());
+        }
+    }
+    if let Some(title) = &task.title {
+        str.push_str(title);
+    }
+    str.push('\n');
+
+    // PLANNING
+    if !planning.is_empty() {
+        str.push_str(&planning);
+        str.push('\n');
+    }
+
+    if with_properties {
+        // PROPERTIES
+        str.push_str(":PROPERTIES:");
+        str.push('\n');
+        macro_rules! print_property {
+            ($p:ident) => {
+                if let Some($p) = &task.$p {
+                    str.push_str(":");
+                    str.push_str(stringify!($p));
+                    str.push_str(": ");
+                    str.push_str(&$p.to_org_string());
+                    str.push('\n');
+                }
+            };
+        }
+        print_property!(etag);
+        print_property!(id);
+        print_property!(updated);
+        print_property!(self_link);
+        print_property!(web_view_link);
+        if let Some(links) = &task.links {
+            str.push_str(&format!(":links: {:?}", links));
+            str.push('\n');
+        }
+        str.push_str(":END:");
+        str.push('\n');
+    }
+
+    // SECTION
+    if let Some(notes) = &task.notes {
+        str.push('\n');
+        str.push_str(notes);
+        str.push('\n');
+    }
+
+    str
 }

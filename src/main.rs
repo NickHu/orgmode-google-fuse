@@ -7,16 +7,18 @@ use clap::Parser;
 use fuse::OrgFS;
 use fuser::MountOption;
 use futures::{stream, StreamExt};
+use tokio::sync::Notify;
 
 use crate::{
-    client::WriteCommand,
-    org::{calendar::OrgCalendar, tasklist::OrgTaskList},
+    org::{calendar::OrgCalendar, tasklist::OrgTaskList, MetaPendingContainer},
+    write::{process_write, WriteCommand},
 };
 
 mod client;
 mod fuse;
 mod oauth;
 mod org;
+mod write;
 
 pub(crate) type Pid = u32;
 
@@ -74,7 +76,7 @@ async fn main() -> std::io::Result<()> {
         OrgFS::new(
             calendars.clone(),
             tasklists.clone(),
-            tx_wcmd,
+            tx_wcmd.clone(),
             tx_fh,
             pending_fh.clone(),
         ),
@@ -83,186 +85,123 @@ async fn main() -> std::io::Result<()> {
     )?;
 
     // spawn background task to poll for calendars updates
+    let trigger_calendar_update = Arc::new(Notify::new());
     tokio::spawn({
-        let client = client.clone();
         let calendars = calendars.clone();
-        let mut sync_tokens = sync_tokens.clone();
+        let tx_wcmd = tx_wcmd.clone();
+        let trigger_calendar_update = trigger_calendar_update.clone();
         async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
             loop {
-                interval.tick().await;
-                if let Err(e) = update_calendars(&client, &calendars, &mut sync_tokens).await {
-                    tracing::error!("Failed to update calendars: {:?}", e);
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = trigger_calendar_update.notified() => { interval.reset() }
+                }
+                tracing::info!("Polling for calendar updates…");
+                for calendar in calendars.iter() {
+                    let calendar_id = calendar
+                        .with_meta(|m| m.calendar().id.clone())
+                        .expect("calendar with no id");
+                    tx_wcmd
+                        .send(WriteCommand::SyncCalendar { calendar_id })
+                        .unwrap();
                 }
             }
         }
     });
 
     // spawn background task to poll for tasks updates
+    let trigger_tasklist_update = Arc::new(Notify::new());
     tokio::spawn({
-        let client = client.clone();
         let tasklists = tasklists.clone();
+        let tx_wcmd = tx_wcmd.clone();
+        let trigger_tasklist_update = trigger_tasklist_update.clone();
         async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
             loop {
-                interval.tick().await;
-                if let Err(e) = update_tasklists(&client, &tasklists).await {
-                    tracing::error!("Failed to update tasklists: {:?}", e);
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = trigger_tasklist_update.notified() => { interval.reset() }
+                }
+                tracing::info!("Polling for task updates…");
+                for tasklist in tasklists.iter() {
+                    let tasklist_id = tasklist
+                        .with_meta(|m| m.tasklist().id.clone())
+                        .expect("tasklist with no id");
+                    tx_wcmd
+                        .send(WriteCommand::SyncTasklist { tasklist_id })
+                        .unwrap();
                 }
             }
         }
     });
 
-    // handle SIGINT and SIGTERM to unmount gracefully
-    let int = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install SIGINT handler");
-    };
-    let term = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    let waitpids = Arc::new(Mutex::new(Vec::default()));
-    tokio::select! {
-        _ = int => {
-            tracing::info!("Received SIGINT, unmounting…");
-        }
-        _ = term => {
-            tracing::info!("Received SIGTERM, unmounting…");
-        }
-        _ = async {
-            while let Some(pid) = rx_fh.recv().await {
-                tracing::debug!("Live PID: {}", pid);
-                let pending_fh = pending_fh.clone();
-                let waitpids = waitpids.clone();
-                if !waitpids.lock().unwrap().contains(&pid) {
-                    // we don't know if the file handle was `release`d, so track active waitpids and don't spawn multiple
-                    tracing::debug!("Spawning waitpid for PID: {}", pid);
-                    tokio::spawn(async move {
-                        waitpids.lock().unwrap().push(pid);
-                        tracing::trace!("waiting: {:?}", waitpids.lock().unwrap());
-                        if let Ok(mut wh) = waitpid_any::WaitHandle::open(pid as i32) {
-                            wh.wait().unwrap();
-                        }
-                        tracing::debug!("Dropping PID: {}", pid);
-                        pending_fh.lock().unwrap().retain(|(_ino, p), _| pid != *p);
-                        waitpids.lock().unwrap().retain(|p| pid != *p);
-                        tracing::trace!("waiting: {:?}", waitpids.lock().unwrap());
-                    });
-                }
+    loop {
+        // handle SIGINT and SIGTERM to unmount gracefully
+        let int = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install SIGINT handler");
+        };
+        let term = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+        let hup = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("failed to install SIGHUP handler")
+                .recv()
+                .await;
+        };
+        let waitpids = Arc::new(Mutex::new(Vec::default()));
+        tokio::select! {
+            _ = int => {
+                tracing::info!("Received SIGINT, unmounting…");
+                break;
             }
-        } => {}
-        _ = async {
-            while let Some(wcmd) = rx_wcmd.recv().await {
-                match wcmd {
-                    WriteCommand::InsertTask { tasklist_id, task } => {
-                        client
-                            .insert_task(&tasklist_id, task)
-                            .await
-                            .expect("Failed to insert task");
-                    }
-                    WriteCommand::PatchTask {
-                        tasklist_id,
-                        task_id,
-                        task,
-                    } => {
-                        client
-                            .patch_task(&tasklist_id, &task_id, task)
-                            .await
-                            .expect("Failed to patch task");
-                    }
-                    WriteCommand::DeleteTask {
-                        tasklist_id,
-                        task_id,
-                    } => {
-                        client
-                            .delete_task(&tasklist_id, &task_id)
-                            .await
-                            .expect("Failed to delete task");
-                        // the server won't tell us about the deletion, so manually remove it here
-                        let tasklist = tasklists
-                            .iter()
-                            .find(|tl| tl.meta().tasklist().id.as_ref() == Some(&tasklist_id))
-                            .expect("Tasklist not found");
-                        tasklist.delete_id(&task_id);
-                    }
-                    WriteCommand::SyncTasklist { tasklist_id } => {
-                        let tasklist = tasklists
-                            .iter()
-                            .find(|tl| tl.meta().tasklist().id.as_ref() == Some(&tasklist_id))
-                            .expect("Tasklist not found");
-                        // give fsync, file close some time to settle
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        update_tasklist(&client, tasklist)
-                            .await
-                            .expect("Failed to sync tasks");
-                    }
-                    WriteCommand::InsertCalendarEvent { calendar_id, event } => {
-                        client
-                            .insert_event(&calendar_id, event)
-                            .await
-                            .expect("Failed to insert calendar event");
-                    },
-                    WriteCommand::PatchCalendarEvent { calendar_id, event_id, event } => {
-                        client
-                            .patch_event(&calendar_id, &event_id, event)
-                            .await
-                            .expect("Failed to patch calendar event");
-                    },
-                    WriteCommand::DeleteCalendarEvent { calendar_id, event_id } => {
-                        client
-                            .delete_event(&calendar_id, &event_id)
-                            .await
-                            .expect("Failed to delete calendar event");
-                        // the server won't tell us about the deletion, so manually remove it here
-                        let calendar = calendars
-                            .iter()
-                            .find(|cal| cal.meta().calendar().id.as_ref() == Some(&calendar_id))
-                            .expect("Calendar not found");
-                        calendar.delete_id(&event_id);
-                    },
-                    WriteCommand::SyncCalendar { calendar_id } => {
-                        let calendar = calendars
-                            .iter()
-                            .find(|cal| cal.meta().calendar().id.as_ref() == Some(&calendar_id))
-                            .expect("Calendar not found");
-                        let mut guard = sync_tokens.lock().await;
-                        let sync_token = guard
-                            .iter_mut()
-                            .find(|(id, _)| id == &calendar_id)
-                            .and_then(|(_, token)| token.as_mut());
-                        // give fsync, file close some time to settle
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        let next_sync_token = update_calendar(&client, calendar, sync_token.as_deref())
-                            .await
-                            .expect("Failed to sync calendar");
-                        if let (Some(sync_token), Some(next_sync_token)) = (sync_token, next_sync_token) {
-                            *sync_token = next_sync_token;
-                        }
-                    },
-                }
+            _ = term => {
+                tracing::info!("Received SIGTERM, unmounting…");
+                break;
             }
-        } => {
-            tracing::info!("Processed write commands");
+            _ = hup => {
+                tracing::info!("Received SIGHUP, triggering sync…");
+                trigger_calendar_update.notify_waiters();
+                trigger_tasklist_update.notify_waiters();
+            }
+            _ = async {
+                while let Some(pid) = rx_fh.recv().await {
+                    tracing::debug!("Live PID: {}", pid);
+                    let pending_fh = pending_fh.clone();
+                    let waitpids = waitpids.clone();
+                    if !waitpids.lock().unwrap().contains(&pid) {
+                        // we don't know if the file handle was `release`d, so track active waitpids and don't spawn multiple
+                        tracing::debug!("Spawning waitpid for PID: {}", pid);
+                        tokio::spawn(async move {
+                            waitpids.lock().unwrap().push(pid);
+                            tracing::trace!("waiting: {:?}", waitpids.lock().unwrap());
+                            if let Ok(mut wh) = waitpid_any::WaitHandle::open(pid as i32) {
+                                wh.wait().unwrap();
+                            }
+                            tracing::debug!("Dropping PID: {}", pid);
+                            pending_fh.lock().unwrap().retain(|(_ino, p), _| pid != *p);
+                            waitpids.lock().unwrap().retain(|p| pid != *p);
+                            tracing::trace!("waiting: {:?}", waitpids.lock().unwrap());
+                        });
+                    }
+                }
+            } => {}
+            _ = async {
+                while let Some(wcmd) = rx_wcmd.recv().await {
+                    process_write(&client, &calendars, &mut sync_tokens.lock().await, &tasklists, wcmd).await;
+                }
+            } => {
+                tracing::info!("Processed write commands");
+            }
         }
     }
 
-    Ok(())
-}
-
-async fn update_tasklists(
-    client: &client::GoogleClient,
-    tasklists: &[OrgTaskList],
-) -> google_tasks1::Result<()> {
-    tracing::info!("Polling for task updates…");
-    for org_tasklist in tasklists {
-        update_tasklist(client, org_tasklist).await?;
-    }
-    // TODO: newly created tasklists since application start are ignored
-    // TODO: we don't learn about deletes made upstream
     Ok(())
 }
 
@@ -270,12 +209,13 @@ async fn update_tasklist(
     client: &client::GoogleClient,
     org_tasklist: &OrgTaskList,
 ) -> google_tasks1::Result<()> {
-    let meta = org_tasklist.meta();
-    let tl_id = meta.tasklist().id.as_ref().expect("tasklist with no id");
+    let tl_id = org_tasklist
+        .with_meta(|m| m.tasklist().id.clone())
+        .expect("tasklist with no id");
     tracing::info!("Updating tasklist {}…", tl_id);
-    let tasks = client.list_tasks(tl_id).await?;
+    let tasks = client.list_tasks(&tl_id).await?;
     let updated = client
-        .get_tasklist(tl_id)
+        .get_tasklist(&tl_id)
         .await?
         .updated
         .as_ref()
@@ -289,41 +229,14 @@ async fn update_tasklist(
     Ok(())
 }
 
-#[allow(clippy::type_complexity)]
-async fn update_calendars(
-    client: &client::GoogleClient,
-    calendars: &[OrgCalendar],
-    sync_tokens: &mut Arc<tokio::sync::Mutex<Vec<(String, Option<client::SyncToken>)>>>,
-) -> google_calendar3::Result<()> {
-    let new_sync_tokens = Arc::new(tokio::sync::Mutex::new(Vec::default()));
-    {
-        tracing::info!("Polling for calendar updates…");
-        for org_calendar in calendars {
-            let meta = org_calendar.meta();
-            let cal_id = meta.calendar().id.as_ref().expect("calendar with no id");
-            let guard = sync_tokens.lock().await;
-            let sync_token = guard
-                .iter()
-                .find(|(id, _)| id == cal_id)
-                .and_then(|(_, token)| token.as_ref());
-            let new_sync_token = update_calendar(client, org_calendar, sync_token).await?;
-            new_sync_tokens
-                .lock()
-                .await
-                .push((cal_id.clone(), new_sync_token));
-        }
-    }
-    *sync_tokens = new_sync_tokens;
-    Ok(())
-}
-
 async fn update_calendar(
     client: &client::GoogleClient,
     org_calendar: &OrgCalendar,
     sync_token: Option<&client::SyncToken>,
 ) -> google_calendar3::Result<Option<client::SyncToken>> {
-    let meta = org_calendar.meta();
-    let cal_id = meta.calendar().id.as_ref().expect("calendar with no id");
+    let cal_id = org_calendar
+        .with_meta(|m| m.calendar().id.clone())
+        .expect("calendar with no id");
     let events = match sync_token {
         Some(sync_token) => {
             tracing::info!("Syncing calendar {} with token {}", cal_id, sync_token);
@@ -337,6 +250,10 @@ async fn update_calendar(
         }
     };
     let next_sync_token = events.next_sync_token.as_ref().cloned();
-    org_calendar.sync(events);
+    let updated = events
+        .updated
+        .map(|dt| dt.into())
+        .unwrap_or(std::time::UNIX_EPOCH);
+    org_calendar.sync(events, updated);
     Ok(next_sync_token)
 }

@@ -8,8 +8,11 @@ use google_tasks1::{
     hyper_util::{self, client::legacy::connect::HttpConnector},
     Result, TasksHub,
 };
+use tokio::time::timeout;
 
 use crate::oauth::APPLICATION_SECRET;
+
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) type SyncToken = String;
 
@@ -36,9 +39,9 @@ impl GoogleClient {
         .unwrap();
 
         auth.token(&[
-            "https://www.googleapis.com/auth/calendar.readonly",
-            "https://www.googleapis.com/auth/calendar.events.readonly",
-            "https://www.googleapis.com/auth/tasks.readonly",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/tasks",
         ])
         .await
         .expect("Failed to get OAuth token");
@@ -62,37 +65,40 @@ impl GoogleClient {
     }
 
     pub async fn list_calendars(&self) -> Result<CalendarList> {
-        self.calendarhub
-            .calendar_list()
-            .list()
-            .doit()
+        timeout(TIMEOUT, self.calendarhub.calendar_list().list().doit())
             .await
+            .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
             .map(|(_res, calendar_list)| calendar_list)
     }
 
     #[allow(unused)]
     pub async fn get_calendar(&self, calendar_id: &str) -> Result<Calendar> {
-        self.calendarhub
-            .calendars()
-            .get(calendar_id)
-            .doit()
-            .await
-            .map(|(_res, calendar)| calendar)
+        timeout(
+            TIMEOUT,
+            self.calendarhub.calendars().get(calendar_id).doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|(_res, calendar)| calendar)
     }
 
     pub async fn list_events(&self, calendar_id: &str) -> Result<Events> {
-        self.calendarhub
-            .events()
-            .list(calendar_id)
-            .time_min(
-                // a year ago
-                chrono::Utc::now()
-                    .checked_sub_signed(chrono::Duration::days(365))
-                    .unwrap(),
-            )
-            .doit()
-            .await
-            .map(|(_res, events)| events)
+        timeout(
+            TIMEOUT,
+            self.calendarhub
+                .events()
+                .list(calendar_id)
+                .time_min(
+                    // a year ago
+                    chrono::Utc::now()
+                        .checked_sub_signed(chrono::Duration::days(365))
+                        .unwrap(),
+                )
+                .doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|(_res, events)| events)
     }
 
     pub async fn list_events_with_sync_token(
@@ -100,32 +106,38 @@ impl GoogleClient {
         calendar_id: &str,
         sync_token: &SyncToken,
     ) -> Result<Events> {
-        self.calendarhub
-            .events()
-            .list(calendar_id)
-            .sync_token(sync_token)
-            .doit()
-            .await
-            .map(|(_res, events)| events)
+        timeout(
+            TIMEOUT,
+            self.calendarhub
+                .events()
+                .list(calendar_id)
+                .sync_token(sync_token)
+                .doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|(_res, events)| events)
     }
 
     #[allow(unused)]
     pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> Result<Event> {
-        self.calendarhub
-            .events()
-            .get(calendar_id, event_id)
-            .doit()
-            .await
-            .map(|(_res, event)| event)
+        timeout(
+            TIMEOUT,
+            self.calendarhub.events().get(calendar_id, event_id).doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|(_res, event)| event)
     }
 
     pub async fn insert_event(&self, calendar_id: &str, event: Event) -> Result<Event> {
-        self.calendarhub
-            .events()
-            .insert(event, calendar_id)
-            .doit()
-            .await
-            .map(|(_res, event)| event)
+        timeout(
+            TIMEOUT,
+            self.calendarhub.events().insert(event, calendar_id).doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|(_res, event)| event)
     }
 
     pub async fn patch_event(
@@ -134,122 +146,102 @@ impl GoogleClient {
         event_id: &str,
         event: Event,
     ) -> Result<Event> {
-        self.calendarhub
-            .events()
-            .patch(event, calendar_id, event_id)
-            .doit()
-            .await
-            .map(|(_res, event)| event)
+        timeout(
+            TIMEOUT,
+            self.calendarhub
+                .events()
+                .patch(event, calendar_id, event_id)
+                .doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|(_res, event)| event)
     }
 
     pub async fn delete_event(&self, calendar_id: &str, event_id: &str) -> Result<()> {
-        self.calendarhub
-            .events()
-            .delete(calendar_id, event_id)
-            .doit()
-            .await
-            .map(|_res| ())
+        timeout(
+            TIMEOUT,
+            self.calendarhub
+                .events()
+                .delete(calendar_id, event_id)
+                .doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_calendar3::Error::Io(e.into())))
+        .map(|_res| ())
     }
 
     pub async fn list_tasklists(&self) -> Result<TaskLists> {
-        self.taskshub
-            .tasklists()
-            .list()
-            .doit()
+        timeout(TIMEOUT, self.taskshub.tasklists().list().doit())
             .await
+            .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
             .map(|(_res, tasklists)| tasklists)
     }
 
     pub async fn get_tasklist(&self, tasklist_id: &str) -> Result<TaskList> {
-        self.taskshub
-            .tasklists()
-            .get(tasklist_id)
-            .doit()
+        timeout(TIMEOUT, self.taskshub.tasklists().get(tasklist_id).doit())
             .await
+            .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
             .map(|(_res, tasklist)| tasklist)
     }
 
     pub async fn list_tasks(&self, tasklist_id: &str) -> Result<Tasks> {
-        self.taskshub
-            .tasks()
-            .list(tasklist_id)
-            .max_results(100)
-            .show_deleted(false)
-            .show_hidden(false)
-            .doit()
-            .await
-            .map(|(_res, tasks)| tasks)
+        timeout(
+            TIMEOUT,
+            self.taskshub
+                .tasks()
+                .list(tasklist_id)
+                .max_results(100)
+                .show_deleted(false)
+                .show_hidden(false)
+                .doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+        .map(|(_res, tasks)| tasks)
     }
 
     #[allow(unused)]
     pub async fn get_task(&self, tasklist_id: &str, task_id: &str) -> Result<Task> {
-        self.taskshub
-            .tasks()
-            .get(tasklist_id, task_id)
-            .doit()
-            .await
-            .map(|(_res, task)| task)
+        timeout(
+            TIMEOUT,
+            self.taskshub.tasks().get(tasklist_id, task_id).doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+        .map(|(_res, task)| task)
     }
 
     pub async fn insert_task(&self, tasklist_id: &str, task: Task) -> Result<Task> {
-        self.taskshub
-            .tasks()
-            .insert(task, tasklist_id)
-            .doit()
-            .await
-            .map(|(_res, task)| task)
+        timeout(
+            TIMEOUT,
+            self.taskshub.tasks().insert(task, tasklist_id).doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+        .map(|(_res, task)| task)
     }
 
     pub async fn patch_task(&self, tasklist_id: &str, task_id: &str, task: Task) -> Result<Task> {
-        self.taskshub
-            .tasks()
-            .patch(task, tasklist_id, task_id)
-            .doit()
-            .await
-            .map(|(_res, task)| task)
+        timeout(
+            TIMEOUT,
+            self.taskshub
+                .tasks()
+                .patch(task, tasklist_id, task_id)
+                .doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+        .map(|(_res, task)| task)
     }
 
     pub async fn delete_task(&self, tasklist_id: &str, task_id: &str) -> Result<()> {
-        self.taskshub
-            .tasks()
-            .delete(tasklist_id, task_id)
-            .doit()
-            .await
-            .map(|_res| ())
+        timeout(
+            TIMEOUT,
+            self.taskshub.tasks().delete(tasklist_id, task_id).doit(),
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+        .map(|_res| ())
     }
-}
-
-pub(crate) enum WriteCommand {
-    InsertTask {
-        tasklist_id: String,
-        task: Task,
-    },
-    PatchTask {
-        tasklist_id: String,
-        task_id: String,
-        task: Task,
-    },
-    DeleteTask {
-        tasklist_id: String,
-        task_id: String,
-    },
-    SyncTasklist {
-        tasklist_id: String,
-    },
-    InsertCalendarEvent {
-        calendar_id: String,
-        event: Event,
-    },
-    PatchCalendarEvent {
-        calendar_id: String,
-        event_id: String,
-        event: Event,
-    },
-    DeleteCalendarEvent {
-        calendar_id: String,
-        event_id: String,
-    },
-    SyncCalendar {
-        calendar_id: String,
-    },
 }

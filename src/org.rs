@@ -1,8 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
+    hash::Hash,
+    sync::MutexGuard,
 };
 
+use evmap::WriteHandle;
 use orgize::{
     ast::{Headline, Token},
     export::{from_fn, Container, Event},
@@ -10,6 +13,7 @@ use orgize::{
 };
 
 pub(crate) mod calendar;
+pub(crate) mod conflict;
 pub(crate) mod tasklist;
 pub(crate) mod timestamp;
 
@@ -50,7 +54,7 @@ impl ToOrg for Org {
 }
 
 #[derive(Debug, Clone)]
-struct ByETag<T>(T)
+pub(crate) struct ByETag<T>(T)
 where
     T: Debug + Clone;
 
@@ -59,14 +63,13 @@ type Id = String;
 macro_rules! def_org_meta {
     ($ty:ty { $($field:ident : $field_ty:ty),* }) => {
         paste::paste!{
-            #[derive(Debug, Clone)]
             struct [<$ty Inner>] {
                 $(
                     $field: $field_ty,
                 )*
             }
 
-            #[derive(Debug, Clone)]
+            #[derive(Clone)]
             pub(crate) struct $ty(std::sync::Arc<[<$ty Inner>]>);
 
             impl From<($($field_ty),*)> for $ty {
@@ -175,3 +178,70 @@ macro_rules! text_from_property_drawer {
 }
 
 use text_from_property_drawer;
+
+pub(crate) trait MetaPendingContainer
+where
+    ByETag<Self::Item>: Eq + Hash,
+{
+    type Meta: Clone + 'static;
+    type Item: Debug + Clone;
+    type Insert: Clone + Eq + Hash;
+    type Modify: Clone;
+
+    fn with_meta<T>(&self, f: impl FnOnce(&Self::Meta) -> T) -> T;
+    fn with_pending<T>(
+        &self,
+        f: impl FnOnce(&(HashSet<Self::Insert>, HashMap<Id, Self::Modify>)) -> T,
+    ) -> T;
+    #[allow(clippy::type_complexity)]
+    fn write(&self) -> MutexGuard<'_, WriteHandle<Id, Box<ByETag<Self::Item>>, Self::Meta>>;
+    fn update_pending(
+        meta: &Self::Meta,
+        pending: (HashSet<Self::Insert>, HashMap<Id, Self::Modify>),
+    ) -> Self::Meta;
+
+    fn add_id(&self, id: &str, item: Self::Item) {
+        let mut guard = self.write();
+        tracing::debug!("Adding item: {id}");
+        guard.insert(id.to_owned(), Box::new(ByETag(item)));
+        guard.refresh();
+    }
+
+    fn update_id(&self, id: &str, item: Self::Item) {
+        let mut guard = self.write();
+        tracing::debug!("Updating item: {id}");
+        guard.update(id.to_owned(), Box::new(ByETag(item)));
+        guard.refresh();
+    }
+
+    fn delete_id(&self, id: &str) {
+        let mut guard = self.write();
+        tracing::debug!("Deleting item: {id}");
+        guard.empty(id.to_owned());
+        guard.refresh();
+    }
+
+    fn push_pending_insert(&self, insert: Self::Insert) {
+        let mut guard = self.write();
+        let mut new_pending = self.with_pending(Clone::clone);
+        new_pending.0.insert(insert);
+        guard.set_meta(self.with_meta(|m| Self::update_pending(m, new_pending)));
+        guard.refresh();
+    }
+
+    fn push_pending_modify(&self, id: Id, modify: Self::Modify) {
+        let mut guard = self.write();
+        let mut new_pending = self.with_pending(Clone::clone);
+        new_pending.1.insert(id, modify);
+        guard.set_meta(self.with_meta(|m| Self::update_pending(m, new_pending)));
+        guard.refresh();
+    }
+
+    fn clear_pending(&self) -> Self::Meta {
+        let mut guard = self.write();
+        let new_pending = Default::default();
+        let meta = guard.set_meta(self.with_meta(|m| Self::update_pending(m, new_pending)));
+        guard.refresh();
+        meta
+    }
+}
