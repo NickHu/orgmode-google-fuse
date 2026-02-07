@@ -92,6 +92,7 @@ async fn main() -> std::io::Result<()> {
         let trigger_calendar_update = trigger_calendar_update.clone();
         async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.reset();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
@@ -118,6 +119,7 @@ async fn main() -> std::io::Result<()> {
         let trigger_tasklist_update = trigger_tasklist_update.clone();
         async move {
             let mut interval = tokio::time::interval(POLL_INTERVAL);
+            interval.reset();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
