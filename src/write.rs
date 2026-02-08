@@ -318,7 +318,10 @@ pub(super) async fn process_write(
 
             let next_sync_token = update_calendar(client, calendar, sync_token.as_deref())
                 .await
-                .expect("Failed to sync calendar");
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to sync calendar {}: {}", calendar_id, e);
+                    None
+                });
             if let (Some(sync_token), Some(next_sync_token)) = (sync_token, next_sync_token) {
                 *sync_token = next_sync_token;
             }
@@ -327,7 +330,7 @@ pub(super) async fn process_write(
             let calendar = calendars
                 .iter()
                 .find(|tl| tl.with_meta(|m| m.calendar().id.as_ref() == Some(&calendar_id)))
-                .expect("calendar not found");
+                .expect("Calendar not found");
             calendar.with_meta(|m| {
                 m.updated()
                     .store(SystemTime::now() + TOUCH_DELAY, Ordering::Release)
@@ -368,9 +371,9 @@ pub(super) async fn process_write(
                 }
             }
 
-            update_tasklist(client, tasklist)
-                .await
-                .expect("Failed to sync tasks");
+            if let Err(e) = update_tasklist(client, tasklist).await {
+                tracing::error!("Failed to sync tasklist {}: {}", tasklist_id, e);
+            }
         }
         WriteCommand::TouchTasklist { tasklist_id } => {
             let tasklist = tasklists
