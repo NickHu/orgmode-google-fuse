@@ -244,4 +244,27 @@ impl GoogleClient {
         .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
         .map(|_res| ())
     }
+
+    pub(crate) async fn move_task(
+        &self,
+        tasklist_id: &str,
+        task_id: &str,
+        new_predecessor: Option<&str>,
+    ) -> Result<Task> {
+        timeout(
+            TIMEOUT,
+            if let Some(new_predecessor) = new_predecessor {
+                self.taskshub
+                    .tasks()
+                    .move_(tasklist_id, task_id)
+                    .previous(new_predecessor)
+                    .doit()
+            } else {
+                self.taskshub.tasks().move_(tasklist_id, task_id).doit()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
+        .map(|(_res, task)| task)
+    }
 }

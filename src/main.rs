@@ -18,6 +18,7 @@ mod client;
 mod fuse;
 mod oauth;
 mod org;
+mod streaming;
 mod write;
 
 pub(crate) type Pid = u32;

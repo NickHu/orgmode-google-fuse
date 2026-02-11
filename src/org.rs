@@ -5,7 +5,8 @@ use std::{
     sync::MutexGuard,
 };
 
-use evmap::WriteHandle;
+use evmap::{ReadHandle, WriteHandle};
+use itertools::Itertools;
 use orgize::{
     ast::{Headline, Token},
     export::{from_fn, Container, Event},
@@ -54,7 +55,7 @@ impl ToOrg for Org {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ByETag<T>(T)
+pub(crate) struct ByETag<T>(pub(super) T)
 where
     T: Debug + Clone;
 
@@ -129,16 +130,85 @@ impl MaybeIdMap {
         self.fresh.iter()
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn diff(
         mut self,
         mut other: MaybeIdMap,
-    ) -> (MaybeIdMap, MaybeIdMap, HashMap<Token, Headline>) {
+    ) -> (
+        MaybeIdMap,
+        MaybeIdMap,
+        (
+            HashMap<Token, Headline>,
+            Vec<(Token, (Option<Token>, Option<Token>))>,
+        ),
+    ) {
         let intersection = self
             .map
             .keys()
             .filter(|k| other.map.contains_key(*k))
             .cloned()
             .collect::<Vec<_>>();
+        let moves = {
+            let permutation = intersection
+                .iter()
+                .sorted_unstable_by_key(|k| other.map[*k].start())
+                .enumerate()
+                .sorted_unstable_by_key(|(_, k)| self.map[*k].start())
+                .collect::<Vec<_>>();
+            fn longest_increasing_subsequence<T: Debug, K: Ord, F: Fn(&T) -> K>(
+                sequence: &[T],
+                key: F,
+            ) -> Vec<K> {
+                let mut iter = sequence.iter().enumerate();
+                let (i, x) = iter.next().unwrap();
+
+                let mut min_ending_of_length = Vec::new();
+                let mut predecessor = vec![None; sequence.len()];
+                min_ending_of_length.push((i, x));
+                for (i, x) in iter {
+                    let (prev_i, prev_longest) = min_ending_of_length.last().copied().unwrap();
+                    if key(x) > key(prev_longest) {
+                        predecessor[i] = Some(prev_i);
+                        min_ending_of_length.push((i, x));
+                    } else {
+                        let j = min_ending_of_length.partition_point(|(_, y)| key(y) < key(x));
+                        // j is the first such that key(x) <= key(min_ending_of_length[j].1)
+                        predecessor[i] = predecessor[j];
+                        min_ending_of_length[j] = (i, x);
+                    }
+                }
+                let mut lis = Vec::with_capacity(min_ending_of_length.len());
+                let (mut i, _) = min_ending_of_length.pop().unwrap();
+                lis.push(key(&sequence[i]));
+                while let Some(prev_i) = predecessor[i] {
+                    lis.push(key(&sequence[prev_i]));
+                    i = prev_i;
+                }
+                lis.reverse();
+                lis
+            }
+            let mut lis = longest_increasing_subsequence(&permutation, |(i, _)| *i);
+            let mut moves = Vec::with_capacity(permutation.len() - lis.len());
+            for (i, id) in &permutation {
+                if lis.binary_search(i).is_err() {
+                    let j = lis.partition_point(|&x| x < *i);
+                    // j first such that lis[j] >= i
+                    moves.push((
+                        (*id).clone(),
+                        (
+                            j.checked_sub(1).and_then(|j| lis.get(j)).map(|t| {
+                                permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()
+                            }),
+                            lis.get(j).map(|t| {
+                                permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()
+                            }),
+                        ),
+                    ));
+                    lis.insert(j, *i);
+                }
+            }
+            moves
+        };
         let changed: HashMap<Token, Headline> = intersection
             .into_iter()
             .filter_map(|k| {
@@ -150,7 +220,7 @@ impl MaybeIdMap {
 
         let _ = other.fresh.extract_if(|h| self.fresh.remove(h));
 
-        (self, other, changed)
+        (self, other, (changed, moves))
     }
 }
 
@@ -193,12 +263,17 @@ where
         &self,
         f: impl FnOnce(&(HashSet<Self::Insert>, HashMap<Id, Self::Modify>)) -> T,
     ) -> T;
+    fn read(&self) -> ReadHandle<Id, Box<ByETag<Self::Item>>, Self::Meta>;
     #[allow(clippy::type_complexity)]
     fn write(&self) -> MutexGuard<'_, WriteHandle<Id, Box<ByETag<Self::Item>>, Self::Meta>>;
     fn update_pending(
         meta: &Self::Meta,
         pending: (HashSet<Self::Insert>, HashMap<Id, Self::Modify>),
     ) -> Self::Meta;
+
+    fn get_id(&self, id: &str) -> Option<Box<ByETag<Self::Item>>> {
+        self.read().get_one(id).as_deref().cloned()
+    }
 
     fn add_id(&self, id: &str, item: Self::Item) {
         let mut guard = self.write();

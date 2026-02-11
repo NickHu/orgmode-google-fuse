@@ -6,6 +6,7 @@ use google_tasks1::api::Task;
 use crate::{
     client,
     org::{calendar::OrgCalendar, tasklist::OrgTaskList, MetaPendingContainer},
+    streaming::{digit_stream_to_string, streaming_midpoint, string_to_digit_stream},
     update_calendar, update_tasklist,
 };
 
@@ -124,6 +125,11 @@ pub(crate) enum TaskWrite {
         task_id: String,
         modification: TaskModify,
     },
+    Move {
+        task_id: String,
+        new_predecessor: Option<String>,
+        new_successor: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +241,65 @@ async fn process_tasklist_write(
                 tasklist.push_pending_insert(TaskInsert::Insert { task });
             }
             tracing::trace!("Finish insert");
+        }
+        TaskWrite::Move {
+            task_id,
+            new_predecessor,
+            new_successor,
+        } => {
+            if let Ok(mut new) = client
+                .move_task(&tasklist_id, &task_id, new_predecessor.as_deref())
+                .await
+            {
+                tracing::debug!("Moved task with id: {}", task_id);
+                // modify the task to cheat and keep the global order correct; proper indices are
+                // restored on the next sync
+                let position = (|| match (new_predecessor.as_deref(), new_successor.as_deref()) {
+                    (Some(pred), Some(succ)) => {
+                        tracing::debug!("Moved task {} between {} and {}", task_id, pred, succ);
+                        let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
+                        let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
+                        let midpoint = digit_stream_to_string(streaming_midpoint(
+                            std::iter::chain(
+                                string_to_digit_stream(p),
+                                std::iter::repeat_n(0, n.len().saturating_sub(p.len())),
+                            ),
+                            std::iter::chain(
+                                string_to_digit_stream(n),
+                                std::iter::repeat_n(0, p.len().saturating_sub(n.len())),
+                            ),
+                        ));
+                        Some(midpoint)
+                    }
+                    (Some(pred), None) => {
+                        tracing::debug!("Moved task {} after {}", task_id, pred);
+                        let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
+                        let next = digit_stream_to_string(streaming_midpoint(
+                            string_to_digit_stream(p),
+                            std::iter::repeat_n(9, p.len()),
+                        ));
+                        Some(next)
+                    }
+                    (None, Some(succ)) => {
+                        tracing::debug!("Moved task {} before {}", task_id, succ);
+                        let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
+                        let prev = digit_stream_to_string(streaming_midpoint(
+                            std::iter::repeat_n(0, n.len()),
+                            string_to_digit_stream(n),
+                        ));
+                        Some(prev)
+                    }
+                    (None, None) => {
+                        unreachable!("Move must have at least a predecessor or successor");
+                    }
+                })();
+                new.position = position;
+                tasklist.update_id(&task_id, new);
+            } else {
+                tracing::error!("Failed to move task with id: {}", task_id);
+                // TODO: push a move operation to pending modifies; this probably isn't worth
+                // rendering as a conflict
+            }
         }
         TaskWrite::Modify {
             task_id,

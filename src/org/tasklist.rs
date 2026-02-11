@@ -8,13 +8,15 @@ use std::{
 
 use atomic_time::AtomicSystemTime;
 use chrono::Local;
-use evmap::{ReadHandleFactory, WriteHandle};
+use evmap::{ReadHandle, ReadHandleFactory, WriteHandle};
 use google_tasks1::api::{Task, TaskList, Tasks};
+use itertools::Itertools;
 use orgize::ast::Headline;
 
 use crate::org::conflict::push_conflict_str;
 use crate::org::timestamp::Timestamp;
 use crate::org::MetaPendingContainer;
+use crate::streaming::{digit_stream_to_string, streaming_add, string_to_digit_stream};
 use crate::write::{TaskInsert, TaskModify};
 
 use super::{def_org_meta, text_from_property_drawer, ByETag, Id, ToOrg};
@@ -130,6 +132,10 @@ impl MetaPendingContainer for OrgTaskList {
         self.with_meta(|m| f(m.pending()))
     }
 
+    fn read(&self) -> ReadHandle<Id, Box<ByETag<Self::Item>>, Self::Meta> {
+        self.0.handle()
+    }
+
     fn write(
         &self,
     ) -> std::sync::MutexGuard<'_, WriteHandle<Id, Box<ByETag<Self::Item>>, Self::Meta>> {
@@ -162,8 +168,15 @@ impl From<(TaskList, Tasks)> for OrgTaskList {
                 .unwrap_or(std::time::UNIX_EPOCH),
         );
         let (rh, mut wh) = evmap::with_meta((ts.0, updated, Default::default()).into());
-        wh.extend(ts.1.items.unwrap_or_default().into_iter().map(|task| {
+        wh.extend(ts.1.items.unwrap_or_default().into_iter().map(|mut task| {
             let id = task.id.clone().unwrap_or_default();
+            // increment Task position to free up 00000000000000000000
+            if let Some(p) = task.position.iter_mut().next() {
+                *p = digit_stream_to_string(streaming_add(
+                    string_to_digit_stream(&*p),
+                    std::iter::chain(std::iter::repeat_n(0, 19), std::iter::once(1)),
+                ));
+            }
             (id, Box::new(ByETag(task)))
         }));
         wh.refresh();
@@ -176,31 +189,55 @@ impl ToOrg for OrgTaskList {
         let handle = self.0.handle();
         let meta = handle.meta().expect("meta not found");
         let pending = meta.pending();
+        let read_ref = handle.read().unwrap();
         [
-            handle.map_into::<_, Vec<_>, _>(|id, tasks| {
-                let task = tasks
-                    .get_one()
-                    .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
-                let mut str = String::new();
-                match pending.1.get(id) {
-                    Some(TaskModify::Patch { task: new_task }) => {
-                        push_conflict_str(
-                            &mut str,
-                            &render_task(&task.0, "* COMMENT".to_owned(), true),
-                            &render_task(new_task, "* ".to_owned(), false),
-                        );
+            read_ref
+                .iter()
+                .sorted_by_key(|(id, tasks)| {
+                    let task = tasks
+                        .get_one()
+                        .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
+                    format!(
+                        "{}{}",
+                        task.0
+                            .parent
+                            .as_ref()
+                            .and_then(|id| {
+                                let parent = read_ref[id]
+                                    .get_one()
+                                    .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
+                                parent.0.position.clone()
+                            })
+                            .unwrap_or_default(),
+                        task.0.position.as_deref().unwrap_or_default(),
+                    )
+                })
+                .map(|(id, tasks)| {
+                    let task = tasks
+                        .get_one()
+                        .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
+                    let level = if task.0.parent.is_some() { "**" } else { "*" };
+                    let mut str = String::new();
+                    match pending.1.get(id) {
+                        Some(TaskModify::Patch { task: new_task }) => {
+                            push_conflict_str(
+                                &mut str,
+                                &render_task(&task.0, format!("{level} COMMENT "), true),
+                                &render_task(new_task, format!("{level} "), false),
+                            );
+                        }
+                        Some(TaskModify::Delete) => {
+                            push_conflict_str(
+                                &mut str,
+                                &render_task(&task.0, format!("{level} COMMENT "), true),
+                                "",
+                            );
+                        }
+                        None => str.push_str(&render_task(&task.0, format!("{level} "), true)),
                     }
-                    Some(TaskModify::Delete) => {
-                        push_conflict_str(
-                            &mut str,
-                            &render_task(&task.0, "* COMMENT".to_owned(), true),
-                            "",
-                        );
-                    }
-                    None => str.push_str(&render_task(&task.0, "* ".to_owned(), true)),
-                }
-                str
-            }),
+                    str
+                })
+                .collect::<Vec<_>>(),
             pending
                 .0
                 .iter()

@@ -8,7 +8,7 @@ use std::{hash::Hash, sync::Arc};
 use atomic_time::AtomicSystemTime;
 use chrono::Local;
 use chrono_tz::Tz;
-use evmap::{ReadHandleFactory, WriteHandle};
+use evmap::{ReadHandle, ReadHandleFactory, WriteHandle};
 use google_calendar3::api::{CalendarListEntry, Event, EventDateTime, Events};
 use itertools::Itertools;
 use orgize::ast::Headline;
@@ -154,6 +154,10 @@ impl MetaPendingContainer for OrgCalendar {
         self.with_meta(|m| f(m.pending()))
     }
 
+    fn read(&self) -> ReadHandle<Id, Box<ByETag<Self::Item>>, Self::Meta> {
+        self.0.handle()
+    }
+
     fn write(
         &self,
     ) -> std::sync::MutexGuard<'_, WriteHandle<Id, Box<ByETag<Self::Item>>, Self::Meta>> {
@@ -250,14 +254,14 @@ impl ToOrg for OrgCalendar {
                         Some(CalendarEventModify::Patch { event: new_event }) => {
                             push_conflict_str(
                                 &mut str,
-                                &render_event(&event.0, "* COMMENT".to_owned(), true),
+                                &render_event(&event.0, "* COMMENT ".to_owned(), true),
                                 &render_event(new_event, "* ".to_owned(), false),
                             );
                         }
                         Some(CalendarEventModify::Delete) => {
                             push_conflict_str(
                                 &mut str,
-                                &render_event(&event.0, "* COMMENT".to_owned(), true),
+                                &render_event(&event.0, "* COMMENT ".to_owned(), true),
                                 "",
                             );
                         }

@@ -473,7 +473,7 @@ impl Filesystem for OrgFS {
                 let new_org = Org::parse(read_conflict_local(&written));
                 let new = MaybeIdMap::from(&new_org);
                 tracing::debug!("New: {:?} ", new);
-                let (removed, added, changed) = old.diff(new);
+                let (removed, added, (changed, moves)) = old.diff(new);
                 tracing::debug!(
                     "Computed diff\nRemoved: {:?}\nAdded: {:?}\nChanged: {:?}",
                     removed,
@@ -506,17 +506,17 @@ impl Filesystem for OrgFS {
                             let calendar_id = meta.calendar().id.as_ref().unwrap();
 
                             let mut did_write = false;
-                            for headline in added.fresh() {
-                                let event = OrgCalendar::parse_event(headline).into();
-                                tracing::info!("Adding new event: {:?}", event);
+                            for id in removed.map().keys() {
+                                tracing::info!("Removing event with id {:?}", id);
                                 self.tx_wcmd
                                     .send(WriteCommand::CalendarEvent {
                                         calendar_id: calendar_id.clone(),
-                                        cmd: CalendarEventWrite::Insert(
-                                            CalendarEventInsert::Insert { event },
-                                        ),
+                                        cmd: CalendarEventWrite::Modify {
+                                            event_id: id.to_string(),
+                                            modification: CalendarEventModify::Delete,
+                                        },
                                     })
-                                    .expect("Failed to send InsertCalendarEvent command");
+                                    .expect("Failed to send event delete command");
                                 did_write = true;
                             }
                             for (id, updated) in changed {
@@ -530,20 +530,20 @@ impl Filesystem for OrgFS {
                                             modification: CalendarEventModify::Patch { event },
                                         },
                                     })
-                                    .expect("Failed to send UpdateCalendarEvent command");
+                                    .expect("Failed to send event modify command");
                                 did_write = true;
                             }
-                            for id in removed.map().keys() {
-                                tracing::info!("Removing event with id {:?}", id);
+                            for headline in added.fresh() {
+                                let event = OrgCalendar::parse_event(headline).into();
+                                tracing::info!("Adding new event: {:?}", event);
                                 self.tx_wcmd
                                     .send(WriteCommand::CalendarEvent {
                                         calendar_id: calendar_id.clone(),
-                                        cmd: CalendarEventWrite::Modify {
-                                            event_id: id.to_string(),
-                                            modification: CalendarEventModify::Delete,
-                                        },
+                                        cmd: CalendarEventWrite::Insert(
+                                            CalendarEventInsert::Insert { event },
+                                        ),
                                     })
-                                    .expect("Failed to send DeleteCalendarEvent command");
+                                    .expect("Failed to send event insert command");
                                 did_write = true;
                             }
 
@@ -555,7 +555,7 @@ impl Filesystem for OrgFS {
                                     .send(WriteCommand::TouchCalendar {
                                         calendar_id: calendar_id.clone(),
                                     })
-                                    .expect("Failed to send TouchCalendar command");
+                                    .expect("Failed to send calendar touch command");
                             } else {
                                 tracing::debug!(
                                     "No changes detected during fsync for calendar {}",
@@ -576,15 +576,31 @@ impl Filesystem for OrgFS {
                             let tasklist_id = meta.tasklist().id.as_ref().unwrap();
 
                             let mut did_write = false;
-                            for headline in added.fresh() {
-                                let task = OrgTaskList::parse_task(headline).into();
-                                tracing::info!("Adding new task: {:?}", task);
+                            for id in removed.map().keys() {
+                                tracing::info!("Removing task with id {:?}", id);
                                 self.tx_wcmd
                                     .send(WriteCommand::Task {
                                         tasklist_id: tasklist_id.clone(),
-                                        cmd: TaskWrite::Insert(TaskInsert::Insert { task }),
+                                        cmd: TaskWrite::Modify {
+                                            task_id: id.to_string(),
+                                            modification: TaskModify::Delete,
+                                        },
                                     })
-                                    .expect("Failed to send InsertTask command");
+                                    .expect("Failed to send task delete command");
+                                did_write = true;
+                            }
+                            for (from, (pred, succ)) in moves {
+                                tracing::info!("Moving task {from:?} between ({pred:?}, {succ:?})");
+                                self.tx_wcmd
+                                    .send(WriteCommand::Task {
+                                        tasklist_id: tasklist_id.clone(),
+                                        cmd: TaskWrite::Move {
+                                            task_id: from.to_string(),
+                                            new_predecessor: pred.map(|x| x.to_string()),
+                                            new_successor: succ.map(|x| x.to_string()),
+                                        },
+                                    })
+                                    .expect("Failed to send task move command");
                                 did_write = true;
                             }
                             for (id, updated) in changed {
@@ -598,20 +614,18 @@ impl Filesystem for OrgFS {
                                             modification: TaskModify::Patch { task },
                                         },
                                     })
-                                    .expect("Failed to send UpdateTask command");
+                                    .expect("Failed to send task modify command");
                                 did_write = true;
                             }
-                            for id in removed.map().keys() {
-                                tracing::info!("Removing task with id {:?}", id);
+                            for headline in added.fresh() {
+                                let task = OrgTaskList::parse_task(headline).into();
+                                tracing::info!("Adding new task: {:?}", task);
                                 self.tx_wcmd
                                     .send(WriteCommand::Task {
                                         tasklist_id: tasklist_id.clone(),
-                                        cmd: TaskWrite::Modify {
-                                            task_id: id.to_string(),
-                                            modification: TaskModify::Delete,
-                                        },
+                                        cmd: TaskWrite::Insert(TaskInsert::Insert { task }),
                                     })
-                                    .expect("Failed to send DeleteTask command");
+                                    .expect("Failed to send task insert command");
                                 did_write = true;
                             }
 
@@ -623,7 +637,7 @@ impl Filesystem for OrgFS {
                                     .send(WriteCommand::TouchTasklist {
                                         tasklist_id: tasklist_id.clone(),
                                     })
-                                    .expect("Failed to send TouchCalendar command");
+                                    .expect("Failed to send tasklist touch command");
                             } else {
                                 tracing::debug!(
                                     "No changes detected during fsync for tasklist {}",
