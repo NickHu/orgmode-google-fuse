@@ -53,7 +53,8 @@ pub(crate) struct OrgTaskList(
 impl OrgTaskList {
     pub fn sync(&self, ts: Tasks, updated: SystemTime) {
         let mut guard = self.1.lock().unwrap();
-        for t in ts.items.unwrap_or_default() {
+        for mut t in ts.items.unwrap_or_default() {
+            bump_position(&mut t);
             let Some(id) = &t.id else {
                 tracing::warn!("Task without id found: {:?}", t);
                 continue;
@@ -170,17 +171,21 @@ impl From<(TaskList, Tasks)> for OrgTaskList {
         let (rh, mut wh) = evmap::with_meta((ts.0, updated, Default::default()).into());
         wh.extend(ts.1.items.unwrap_or_default().into_iter().map(|mut task| {
             let id = task.id.clone().unwrap_or_default();
-            // increment Task position to free up 00000000000000000000
-            if let Some(p) = task.position.iter_mut().next() {
-                *p = digit_stream_to_string(streaming_add(
-                    string_to_digit_stream(&*p),
-                    std::iter::chain(std::iter::repeat_n(0, 19), std::iter::once(1)),
-                ));
-            }
+            bump_position(&mut task);
             (id, Box::new(ByETag(task)))
         }));
         wh.refresh();
         Self(rh.factory(), Arc::new(Mutex::new(wh)))
+    }
+}
+
+pub(crate) fn bump_position(task: &mut Task) {
+    // increment Task position to free up 00000000000000000000
+    if let Some(p) = task.position.iter_mut().next() {
+        *p = digit_stream_to_string(streaming_add(
+            string_to_digit_stream(&*p),
+            std::iter::chain(std::iter::repeat_n(0, 19), std::iter::once(1)),
+        ));
     }
 }
 

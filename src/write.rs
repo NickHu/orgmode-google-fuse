@@ -5,7 +5,11 @@ use google_tasks1::api::Task;
 
 use crate::{
     client,
-    org::{calendar::OrgCalendar, tasklist::OrgTaskList, MetaPendingContainer},
+    org::{
+        calendar::OrgCalendar,
+        tasklist::{bump_position, OrgTaskList},
+        MetaPendingContainer,
+    },
     streaming::{digit_stream_to_string, streaming_midpoint, string_to_digit_stream},
     update_calendar, update_tasklist,
 };
@@ -227,9 +231,8 @@ async fn process_tasklist_write(
     let tasklist_id = tasklist.with_meta(|m| m.tasklist().id.clone()).unwrap();
     match cmd {
         TaskWrite::Insert(TaskInsert::Insert { task }) => {
-            tracing::trace!("Inserting");
-            if let Ok(new) = client.insert_task(&tasklist_id, *task.clone()).await {
-                tracing::trace!("Success");
+            if let Ok(mut new) = client.insert_task(&tasklist_id, *task.clone()).await {
+                bump_position(&mut new);
                 let id = new
                     .id
                     .clone()
@@ -240,7 +243,6 @@ async fn process_tasklist_write(
                 tracing::error!("Failed to insert task; saving");
                 tasklist.push_pending_insert(TaskInsert::Insert { task });
             }
-            tracing::trace!("Finish insert");
         }
         TaskWrite::Move {
             task_id,
@@ -305,10 +307,11 @@ async fn process_tasklist_write(
             task_id,
             modification: TaskModify::Patch { task },
         } => {
-            if let Ok(new) = client
+            if let Ok(mut new) = client
                 .patch_task(&tasklist_id, &task_id, *task.clone())
                 .await
             {
+                bump_position(&mut new);
                 tracing::debug!("Updated task with id: {}", task_id);
                 tasklist.update_id(&task_id, new);
             } else {
