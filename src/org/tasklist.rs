@@ -313,6 +313,8 @@ fn render_task(task: &Task, prefix: String, with_properties: bool) -> String {
         print_property!(updated);
         print_property!(self_link);
         print_property!(web_view_link);
+        print_property!(parent);
+        print_property!(position);
         if let Some(links) = &task.links {
             str.push_str(&format!(":links: {:?}", links));
             str.push('\n');

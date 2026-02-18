@@ -145,20 +145,14 @@ impl MaybeIdMap {
         let intersection = self
             .map
             .keys()
-            .filter(|k| other.map.contains_key(*k))
+            .filter(|&k| other.map.contains_key(k))
             .cloned()
             .collect::<Vec<_>>();
         let moves = {
-            let permutation = intersection
-                .iter()
-                .sorted_unstable_by_key(|k| other.map[*k].start())
-                .enumerate()
-                .sorted_unstable_by_key(|(_, k)| self.map[*k].start())
-                .collect::<Vec<_>>();
-            fn longest_increasing_subsequence<T: Debug, K: Ord, F: Fn(&T) -> K>(
+            fn longest_increasing_subsequence<T: Debug + Copy, K: Ord, F: Fn(&T) -> K>(
                 sequence: &[T],
                 key: F,
-            ) -> Vec<K> {
+            ) -> Vec<T> {
                 let mut iter = sequence.iter().enumerate();
                 let (i, x) = iter.next().unwrap();
 
@@ -179,32 +173,78 @@ impl MaybeIdMap {
                 }
                 let mut lis = Vec::with_capacity(min_ending_of_length.len());
                 let (mut i, _) = min_ending_of_length.pop().unwrap();
-                lis.push(key(&sequence[i]));
+                lis.push(sequence[i]);
                 while let Some(prev_i) = predecessor[i] {
-                    lis.push(key(&sequence[prev_i]));
+                    lis.push(sequence[prev_i]);
                     i = prev_i;
                 }
                 lis.reverse();
                 lis
             }
-            let mut lis = longest_increasing_subsequence(&permutation, |(i, _)| *i);
-            let mut moves = Vec::with_capacity(permutation.len() - lis.len());
-            for (i, id) in &permutation {
-                if lis.binary_search(i).is_err() {
-                    let j = lis.partition_point(|&x| x < *i);
-                    // j first such that lis[j] >= i
-                    moves.push((
-                        (*id).clone(),
-                        (
-                            j.checked_sub(1).and_then(|j| lis.get(j)).map(|t| {
-                                permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()
-                            }),
-                            lis.get(j).map(|t| {
-                                permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()
-                            }),
-                        ),
-                    ));
-                    lis.insert(j, *i);
+            fn ancestor(x: &Headline, y: &Headline) -> bool {
+                x.start() < y.start() && y.end() <= x.end()
+            }
+            let mut moves = Vec::new();
+            for parent in std::iter::chain(
+                std::iter::once(None),
+                intersection
+                    .iter()
+                    .filter(|&p| other.map[p].headlines().next().is_some())
+                    .map(Some),
+            ) {
+                dbg!(parent);
+                let permutation = intersection
+                    .iter()
+                    .filter(|k| {
+                        self.map[*k]
+                            .properties()
+                            .and_then(|props| props.get("parent"))
+                            .as_ref()
+                            == parent
+                    })
+                    .sorted_unstable_by_key(|k| self.map[*k].start())
+                    .collect::<Vec<_>>();
+                dbg!(&permutation);
+                if permutation.len() > 1 {
+                    let mut lis =
+                        longest_increasing_subsequence(&permutation, |&k| other.map[k].start());
+                    for id in intersection.iter().filter(|&k| {
+                        other.map[k]
+                            .properties()
+                            .and_then(|p| p.get("parent"))
+                            .as_ref()
+                            == parent
+                    }) {
+                        if lis
+                            .binary_search_by_key(&self.map[id].start(), |&k| self.map[k].start())
+                            .is_err()
+                        {
+                            let j = lis
+                                .partition_point(|&x| other.map[x].start() < other.map[id].start());
+                            moves.push((
+                                (*id).clone(),
+                                (
+                                    j.checked_sub(1).and_then(|j| lis.get(j).copied()).map(|t| {
+                                        permutation
+                                            .iter()
+                                            .copied()
+                                            .find(|&k| k == t)
+                                            .unwrap()
+                                            .clone()
+                                    }),
+                                    lis.get(j).copied().map(|t| {
+                                        permutation
+                                            .iter()
+                                            .copied()
+                                            .find(|&k| k == t)
+                                            .unwrap()
+                                            .clone()
+                                    }),
+                                ),
+                            ));
+                            lis.insert(j, id);
+                        }
+                    }
                 }
             }
             moves
@@ -214,13 +254,24 @@ impl MaybeIdMap {
             .filter_map(|k| {
                 let old = self.map.remove(&k).unwrap();
                 let new = other.map.remove(&k).unwrap();
-                (old.raw().trim() != new.raw().trim()).then_some((k, new))
+                fn raw_headline(headline: &Headline) -> String {
+                    let mut str = headline.raw();
+                    if let Some(end) = headline
+                        .headlines()
+                        .next()
+                        .and_then(|child| child.start().checked_sub(headline.start()))
+                    {
+                        let _ = str.split_off(end.into());
+                    }
+                    str
+                }
+                (raw_headline(&old).trim() != raw_headline(&new).trim()).then_some((k, new))
             })
             .collect();
 
         let _ = other.fresh.extract_if(|h| self.fresh.remove(h));
 
-        (self, other, (changed, moves))
+        (self, other, (changed, dbg!(moves)))
     }
 }
 
