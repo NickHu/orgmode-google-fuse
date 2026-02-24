@@ -3,14 +3,12 @@
 :id: a
 :END:
 
-** TODO b
-:PROPERTIES:
-:id: b
-:END:
-
-** TODO inserted
-
 ** TODO c
 :PROPERTIES:
 :id: c
+:END:
+
+** TODO d
+:PROPERTIES:
+:id: d
 :END:

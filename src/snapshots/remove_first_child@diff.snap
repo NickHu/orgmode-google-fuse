@@ -1,0 +1,48 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -1,19 +1,14 @@\n * TODO a\n :PROPERTIES:\n :id: a\n :END:\n \n-** TODO b\n-:PROPERTIES:\n-:id: b\n-:END:\n-\n ** TODO c\n :PROPERTIES:\n :id: c\n :END:\n \n ** TODO d\n :PROPERTIES:\n :id: d\n :END:\n"
+input_file: fixtures/remove_first_child/pre.org
+---
+Diff {
+    added: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    removed: MaybeIdMap {
+        fresh: {},
+        map: {
+            "b": Headline {
+                syntax: HEADLINE@36..73
+                  HEADLINE_STARS@36..38 "**"
+                  WHITESPACE@38..39 " "
+                  HEADLINE_KEYWORD_TODO@39..43 "TODO"
+                  WHITESPACE@43..44 " "
+                  HEADLINE_TITLE@44..45
+                    TEXT@44..45 "b"
+                  NEW_LINE@45..46 "\n"
+                  PROPERTY_DRAWER@46..73
+                    DRAWER_BEGIN@46..59
+                      COLON@46..47 ":"
+                      TEXT@47..57 "PROPERTIES"
+                      COLON@57..58 ":"
+                      NEW_LINE@58..59 "\n"
+                    NODE_PROPERTY@59..66
+                      COLON@59..60 ":"
+                      TEXT@60..62 "id"
+                      COLON@62..63 ":"
+                      WHITESPACE@63..64 " "
+                      TEXT@64..65 "b"
+                      NEW_LINE@65..66 "\n"
+                    DRAWER_END@66..72
+                      COLON@66..67 ":"
+                      TEXT@67..70 "END"
+                      COLON@70..71 ":"
+                      NEW_LINE@71..72 "\n"
+                    BLANK_LINE@72..73 "\n"
+                ,
+            },
+        },
+    },
+    changed: {},
+    moves: [],
+}

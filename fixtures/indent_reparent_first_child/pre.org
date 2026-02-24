@@ -11,5 +11,4 @@
 ** TODO c
 :PROPERTIES:
 :id: c
-:parent: b
 :END:

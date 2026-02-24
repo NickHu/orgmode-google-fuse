@@ -199,44 +199,24 @@ impl MaybeIdMap {
                     .filter(|&p| other.map[p].headlines().next().is_some())
                     .map(Some),
             ) {
-                let source_children: HashSet<_> = {
-                    other
-                        .map
-                        .iter()
-                        .filter_map(|(k, h)| {
-                            (h.properties()
-                                .and_then(|props| props.get("parent"))
-                                .as_ref()
-                                == parent)
-                                .then_some(k)
+                let children_relative_to = |map: &HashMap<_, Headline>| match parent {
+                    Some(_) => map
+                        .values()
+                        .find(|h| {
+                            h.properties().and_then(|props| props.get("id")).as_ref() == parent
                         })
+                        .unwrap()
+                        .headlines()
+                        .flat_map(|h| h.properties().and_then(|props| props.get("id")))
+                        .collect(),
+                    None => map
+                        .iter()
+                        .filter_map(|(k, h)| (h.level() == 1).then_some(k))
                         .cloned()
-                }
-                .collect();
-                let target_children = {
-                    match parent {
-                        Some(p) => {
-                            assert_eq!(p, parent.unwrap());
-                            other
-                                .map
-                                .values()
-                                .find(|h| {
-                                    h.properties().and_then(|props| props.get("id")).as_ref()
-                                        == parent
-                                })
-                                .unwrap()
-                                .headlines()
-                                .flat_map(|h| h.properties().and_then(|props| props.get("id")))
-                                .collect()
-                        }
-                        None => other
-                            .map
-                            .iter()
-                            .filter_map(|(k, h)| (h.level() == 1).then_some(k))
-                            .cloned()
-                            .collect(),
-                    }
+                        .collect(),
                 };
+                let source_children: HashSet<_> = children_relative_to(&self.map);
+                let target_children = children_relative_to(&other.map);
                 let permutation = &source_children
                     .intersection(&target_children)
                     .sorted_unstable_by_key(|&k| self.map[k].start())

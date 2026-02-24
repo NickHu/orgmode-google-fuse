@@ -6,5 +6,4 @@
 ** TODO c
 :PROPERTIES:
 :id: c
-:parent: a
 :END:

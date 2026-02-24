@@ -1,0 +1,11 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -1,22 +1,16 @@\n * TODO a\n :PROPERTIES:\n :id: a\n :END:\n \n-** TODO b\n-:PROPERTIES:\n-:id: b\n-:parent: a\n-:END:\n-\n ** TODO c\n :PROPERTIES:\n :id: c\n :parent: a\n :END:\n \n ** TODO d\n :PROPERTIES:\n :id: d\n :parent: a\n :END:\n"
+input_file: fixtures/remove_first_child/pre.org
+---
+[
+    Modify {
+        task_id: "b",
+        modification: Delete,
+    },
+]
