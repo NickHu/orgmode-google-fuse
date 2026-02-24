@@ -5,11 +5,7 @@ use google_tasks1::api::Task;
 
 use crate::{
     client,
-    org::{
-        calendar::OrgCalendar,
-        tasklist::{bump_position, OrgTaskList},
-        MetaPendingContainer,
-    },
+    org::{calendar::OrgCalendar, tasklist::OrgTaskList, MetaPendingContainer},
     streaming::{digit_stream_to_string, streaming_midpoint, string_to_digit_stream},
     update_calendar, update_tasklist,
 };
@@ -275,7 +271,14 @@ async fn process_tasklist_write(
                 )
                 .await
             {
-                bump_position(&mut new);
+                let position = create_position(
+                    new.id.as_ref().unwrap(),
+                    &new_parent,
+                    &new_predecessor,
+                    &new_successor,
+                    tasklist,
+                );
+                new.position = position;
                 let id = new
                     .id
                     .clone()
@@ -308,53 +311,13 @@ async fn process_tasklist_write(
                 .await
             {
                 tracing::debug!("Moved task with id: {}", task_id);
-                // modify the task to cheat and keep the global order correct; proper indices are
-                // restored on the next sync
-                let position = (|| match (
-                    new_parent.as_deref(),
-                    new_predecessor.as_deref(),
-                    new_successor.as_deref(),
-                ) {
-                    (_, Some(pred), Some(succ)) | (Some(pred), None, Some(succ)) => {
-                        tracing::debug!("Moved task {} between {} and {}", task_id, pred, succ);
-                        let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
-                        let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
-                        let midpoint = digit_stream_to_string(streaming_midpoint(
-                            std::iter::chain(
-                                string_to_digit_stream(p),
-                                std::iter::repeat_n(0, n.len().saturating_sub(p.len())),
-                            ),
-                            std::iter::chain(
-                                string_to_digit_stream(n),
-                                std::iter::repeat_n(0, p.len().saturating_sub(n.len())),
-                            ),
-                        ));
-                        Some(midpoint)
-                    }
-                    (_, Some(pred), None) | (Some(pred), None, None) => {
-                        tracing::debug!("Moved task {} after {}", task_id, pred);
-                        let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
-                        let next = digit_stream_to_string(streaming_midpoint(
-                            string_to_digit_stream(p),
-                            std::iter::repeat_n(9, p.len()),
-                        ));
-                        Some(next)
-                    }
-                    (None, None, Some(succ)) => {
-                        tracing::debug!("Moved task {} before {}", task_id, succ);
-                        let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
-                        let prev = digit_stream_to_string(streaming_midpoint(
-                            std::iter::repeat_n(0, n.len()),
-                            string_to_digit_stream(n),
-                        ));
-                        Some(prev)
-                    }
-                    (None, None, None) => {
-                        unreachable!(
-                            "Move must have at least a predecessor or successor or parent"
-                        );
-                    }
-                })();
+                let position = create_position(
+                    &task_id,
+                    &new_parent,
+                    &new_predecessor,
+                    &new_successor,
+                    tasklist,
+                );
                 new.position = position;
                 tasklist.update_id(&task_id, new);
             } else {
@@ -371,7 +334,7 @@ async fn process_tasklist_write(
                 .patch_task(&tasklist_id, &task_id, *task.clone())
                 .await
             {
-                bump_position(&mut new);
+                new.position = task.position;
                 tracing::debug!("Updated task with id: {}", task_id);
                 tasklist.update_id(&task_id, new);
             } else {
@@ -389,6 +352,60 @@ async fn process_tasklist_write(
                 tracing::error!("Failed to delete task with id: {}; saving", task_id);
                 tasklist.push_pending_modify(task_id, TaskModify::Delete);
             }
+        }
+    }
+}
+
+fn create_position(
+    task_id: &String,
+    new_parent: &Option<String>,
+    new_predecessor: &Option<String>,
+    new_successor: &Option<String>,
+    tasklist: &OrgTaskList,
+) -> Option<String> {
+    // modify the task to cheat and keep the global order correct; proper indices are
+    // restored on the next sync
+    match (
+        new_parent.as_deref(),
+        new_predecessor.as_deref(),
+        new_successor.as_deref(),
+    ) {
+        (_, Some(pred), Some(succ)) | (Some(pred), None, Some(succ)) => {
+            tracing::debug!("Put task {} between {} and {}", task_id, pred, succ);
+            let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
+            let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
+            let midpoint = digit_stream_to_string(streaming_midpoint(
+                std::iter::chain(
+                    string_to_digit_stream(p),
+                    std::iter::repeat_n(0, n.len().saturating_sub(p.len())),
+                ),
+                std::iter::chain(
+                    string_to_digit_stream(n),
+                    std::iter::repeat_n(0, p.len().saturating_sub(n.len())),
+                ),
+            ));
+            Some(midpoint)
+        }
+        (_, Some(pred), None) | (Some(pred), None, None) => {
+            tracing::debug!("Put task {} after {}", task_id, pred);
+            let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
+            let next = digit_stream_to_string(streaming_midpoint(
+                string_to_digit_stream(p),
+                std::iter::repeat_n(9, p.len()),
+            ));
+            Some(next)
+        }
+        (None, None, Some(succ)) => {
+            tracing::debug!("Put task {} before {}", task_id, succ);
+            let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
+            let prev = digit_stream_to_string(streaming_midpoint(
+                std::iter::repeat_n(0, n.len()),
+                string_to_digit_stream(n),
+            ));
+            Some(prev)
+        }
+        (None, None, None) => {
+            unreachable!("failed to create new position: must have at least a predecessor or successor or parent");
         }
     }
 }
