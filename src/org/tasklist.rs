@@ -12,12 +12,14 @@ use evmap::{ReadHandle, ReadHandleFactory, WriteHandle};
 use google_tasks1::api::{Task, TaskList, Tasks};
 use itertools::Itertools;
 use orgize::ast::Headline;
+use orgize::export::{from_fn_with_ctx, Container, Event};
+use orgize::Org;
 
 use crate::org::conflict::push_conflict_str;
 use crate::org::timestamp::Timestamp;
-use crate::org::MetaPendingContainer;
+use crate::org::{Diff, MetaPendingContainer, Move};
 use crate::streaming::{digit_stream_to_string, streaming_add, string_to_digit_stream};
-use crate::write::{TaskInsert, TaskModify};
+use crate::write::{TaskInsert, TaskModify, TaskWrite, WriteCommand};
 
 use super::{def_org_meta, text_from_property_drawer, ByETag, Id, ToOrg};
 
@@ -106,6 +108,121 @@ impl OrgTaskList {
             id: text_from_property_drawer!(headline, "id"),
             ..Task::default()
         }
+    }
+
+    pub fn generate_commands(
+        tasklist_id: &str,
+        diff: Diff,
+        tx_wcmd: &tokio::sync::mpsc::UnboundedSender<WriteCommand>,
+        new_org: &Org,
+    ) -> bool {
+        let Diff {
+            added,
+            removed,
+            changed,
+            moves,
+        } = diff;
+
+        let mut did_write = false;
+        for id in removed.map().keys() {
+            tracing::info!("Removing task with id {:?}", id);
+            tx_wcmd
+                .send(WriteCommand::Task {
+                    tasklist_id: tasklist_id.to_owned(),
+                    cmd: TaskWrite::Modify {
+                        task_id: id.to_string(),
+                        modification: TaskModify::Delete,
+                    },
+                })
+                .expect("Failed to send task delete command");
+            did_write = true;
+        }
+        for Move {
+            id: from,
+            before: pred,
+            after: succ,
+        } in moves
+        {
+            tracing::info!("Moving task {from:?} between ({pred:?}, {succ:?})");
+            tx_wcmd
+                .send(WriteCommand::Task {
+                    tasklist_id: tasklist_id.to_owned(),
+                    cmd: TaskWrite::Move {
+                        task_id: from.to_string(),
+                        new_predecessor: pred.map(|x| x.to_string()),
+                        new_successor: succ.map(|x| x.to_string()),
+                    },
+                })
+                .expect("Failed to send task move command");
+            did_write = true;
+        }
+        for (id, updated) in changed {
+            let task = OrgTaskList::parse_task(&updated).into();
+            tracing::info!("Modifying task with id {:?}: {:?}", id, task);
+            tx_wcmd
+                .send(WriteCommand::Task {
+                    tasklist_id: tasklist_id.to_owned(),
+                    cmd: TaskWrite::Modify {
+                        task_id: id.to_string(),
+                        modification: TaskModify::Patch { task },
+                    },
+                })
+                .expect("Failed to send task modify command");
+            did_write = true;
+        }
+        for headline in added.fresh().sorted_by_key(|h| h.start()).rev() {
+            let task = OrgTaskList::parse_task(headline).into();
+            tracing::info!("Adding new task: {:?}", task);
+            // TODO: currently, we can only add subtasks to tasks which are
+            // already on the server (they have ids)
+            let mut new_parent = None;
+            let mut new_predecessor = None;
+            let mut new_successor = None;
+            let mut prev = None;
+            let mut handler = from_fn_with_ctx(|event, ctx| {
+                // find the last headline on the same level with an id before this one
+                if let Event::Enter(Container::Headline(cur)) = event {
+                    if &cur == headline {
+                        ctx.skip();
+                    } else if prev.as_ref() == Some(headline) {
+                        new_successor = cur
+                            .properties()
+                            .and_then(|props| props.get("id"))
+                            .map(|id| id.to_string());
+                        ctx.stop();
+                    } else {
+                        match cur.level().cmp(&headline.level()) {
+                            std::cmp::Ordering::Less => {
+                                if let Some(id) = cur.properties().and_then(|props| props.get("id"))
+                                {
+                                    new_parent.replace(id.to_string());
+                                }
+                            }
+                            std::cmp::Ordering::Equal => {
+                                if let Some(id) = cur.properties().and_then(|props| props.get("id"))
+                                {
+                                    new_predecessor.replace(id.to_string());
+                                }
+                            }
+                            std::cmp::Ordering::Greater => {
+                                ctx.up();
+                            }
+                        }
+                    }
+                    prev.replace(cur);
+                }
+            });
+            new_org.traverse(&mut handler);
+            tx_wcmd
+                .send(WriteCommand::Task {
+                    tasklist_id: tasklist_id.to_owned(),
+                    cmd: TaskWrite::Insert(TaskInsert::Insert { task }),
+                })
+                .expect("Failed to send task insert command");
+            did_write = true;
+        }
+
+        did_write
     }
 }
 

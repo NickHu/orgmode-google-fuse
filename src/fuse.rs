@@ -13,19 +13,13 @@ use itertools::Itertools;
 use libc::{EBADF, EINVAL, ENOENT, ENOTDIR};
 use orgize::Org;
 
+use crate::{org::ToOrg, Pid};
 use crate::{
     org::{
         calendar::OrgCalendar, conflict::read_conflict_local, tasklist::OrgTaskList, MaybeIdMap,
         MetaPendingContainer,
     },
-    write::{
-        CalendarEventInsert, CalendarEventModify, CalendarEventWrite, TaskInsert, TaskModify,
-        TaskWrite, WriteCommand,
-    },
-};
-use crate::{
-    org::{Move, ToOrg},
-    Pid,
+    write::WriteCommand,
 };
 
 const BLKSIZE: u32 = 512;
@@ -500,67 +494,22 @@ impl Filesystem for OrgFS {
                             .map(|(_, cal)| cal)
                             .expect("Calendar file not found during fsync");
                         orgcal.clear_pending();
-                        orgcal.with_meta(|meta| {
-                            let calendar_id = meta.calendar().id.as_ref().unwrap();
-
-                            let mut did_write = false;
-                            for id in diff.removed.map().keys() {
-                                tracing::info!("Removing event with id {:?}", id);
-                                self.tx_wcmd
-                                    .send(WriteCommand::CalendarEvent {
-                                        calendar_id: calendar_id.clone(),
-                                        cmd: CalendarEventWrite::Modify {
-                                            event_id: id.to_string(),
-                                            modification: CalendarEventModify::Delete,
-                                        },
-                                    })
-                                    .expect("Failed to send event delete command");
-                                did_write = true;
-                            }
-                            for (id, updated) in diff.changed {
-                                let event = OrgCalendar::parse_event(&updated).into();
-                                tracing::info!("Modifying event with id {:?}: {:?}", id, event);
-                                self.tx_wcmd
-                                    .send(WriteCommand::CalendarEvent {
-                                        calendar_id: calendar_id.clone(),
-                                        cmd: CalendarEventWrite::Modify {
-                                            event_id: id.to_string(),
-                                            modification: CalendarEventModify::Patch { event },
-                                        },
-                                    })
-                                    .expect("Failed to send event modify command");
-                                did_write = true;
-                            }
-                            for headline in diff.added.fresh() {
-                                let event = OrgCalendar::parse_event(headline).into();
-                                tracing::info!("Adding new event: {:?}", event);
-                                self.tx_wcmd
-                                    .send(WriteCommand::CalendarEvent {
-                                        calendar_id: calendar_id.clone(),
-                                        cmd: CalendarEventWrite::Insert(
-                                            CalendarEventInsert::Insert { event },
-                                        ),
-                                    })
-                                    .expect("Failed to send event insert command");
-                                did_write = true;
-                            }
-
-                            if did_write {
-                                tracing::debug!("Updating cached Org for ino: {}", ino);
-                                *org = new_org;
-                                *write_time = SystemTime::now();
-                                self.tx_wcmd
-                                    .send(WriteCommand::TouchCalendar {
-                                        calendar_id: calendar_id.clone(),
-                                    })
-                                    .expect("Failed to send calendar touch command");
-                            } else {
-                                tracing::debug!(
-                                    "No changes detected during fsync for calendar {}",
-                                    calendar_id
-                                );
-                            }
-                        });
+                        let calendar_id = orgcal
+                            .with_meta(|meta| meta.calendar().id.clone())
+                            .expect("Calendar ID not found during fsync");
+                        if orgcal.generate_commands(diff, &self.tx_wcmd) {
+                            tracing::debug!("Updating cached Org for ino: {}", ino);
+                            *org = new_org;
+                            *write_time = SystemTime::now();
+                            self.tx_wcmd
+                                .send(WriteCommand::TouchCalendar { calendar_id })
+                                .expect("Failed to send calendar touch command");
+                        } else {
+                            tracing::debug!(
+                                "No changes detected during fsync for calendar {}",
+                                calendar_id
+                            );
+                        }
                     }
                     i if self.is_tasks_file(i) => {
                         let orgtask = self
@@ -570,84 +519,27 @@ impl Filesystem for OrgFS {
                             .map(|(_, tl)| tl)
                             .expect("Tasklist file not found during fsync");
                         orgtask.clear_pending();
-                        orgtask.with_meta(|meta| {
-                            let tasklist_id = meta.tasklist().id.as_ref().unwrap();
-
-                            let mut did_write = false;
-                            for id in diff.removed.map().keys() {
-                                tracing::info!("Removing task with id {:?}", id);
-                                self.tx_wcmd
-                                    .send(WriteCommand::Task {
-                                        tasklist_id: tasklist_id.clone(),
-                                        cmd: TaskWrite::Modify {
-                                            task_id: id.to_string(),
-                                            modification: TaskModify::Delete,
-                                        },
-                                    })
-                                    .expect("Failed to send task delete command");
-                                did_write = true;
-                            }
-                            for Move {
-                                id: from,
-                                before: pred,
-                                after: succ,
-                            } in diff.moves
-                            {
-                                tracing::info!("Moving task {from:?} between ({pred:?}, {succ:?})");
-                                self.tx_wcmd
-                                    .send(WriteCommand::Task {
-                                        tasklist_id: tasklist_id.clone(),
-                                        cmd: TaskWrite::Move {
-                                            task_id: from.to_string(),
-                                            new_predecessor: pred.map(|x| x.to_string()),
-                                            new_successor: succ.map(|x| x.to_string()),
-                                        },
-                                    })
-                                    .expect("Failed to send task move command");
-                                did_write = true;
-                            }
-                            for (id, updated) in diff.changed {
-                                let task = OrgTaskList::parse_task(&updated).into();
-                                tracing::info!("Modifying task with id {:?}: {:?}", id, task);
-                                self.tx_wcmd
-                                    .send(WriteCommand::Task {
-                                        tasklist_id: tasklist_id.clone(),
-                                        cmd: TaskWrite::Modify {
-                                            task_id: id.to_string(),
-                                            modification: TaskModify::Patch { task },
-                                        },
-                                    })
-                                    .expect("Failed to send task modify command");
-                                did_write = true;
-                            }
-                            for headline in diff.added.fresh() {
-                                let task = OrgTaskList::parse_task(headline).into();
-                                tracing::info!("Adding new task: {:?}", task);
-                                self.tx_wcmd
-                                    .send(WriteCommand::Task {
-                                        tasklist_id: tasklist_id.clone(),
-                                        cmd: TaskWrite::Insert(TaskInsert::Insert { task }),
-                                    })
-                                    .expect("Failed to send task insert command");
-                                did_write = true;
-                            }
-
-                            if did_write {
-                                tracing::debug!("Updating cached Org for ino: {}", ino);
-                                *org = new_org;
-                                *write_time = SystemTime::now();
-                                self.tx_wcmd
-                                    .send(WriteCommand::TouchTasklist {
-                                        tasklist_id: tasklist_id.clone(),
-                                    })
-                                    .expect("Failed to send tasklist touch command");
-                            } else {
-                                tracing::debug!(
-                                    "No changes detected during fsync for tasklist {}",
-                                    tasklist_id
-                                );
-                            }
-                        });
+                        let tasklist_id = orgtask
+                            .with_meta(|meta| meta.tasklist().id.clone())
+                            .expect("Tasklist ID not found during fsync");
+                        if OrgTaskList::generate_commands(
+                            &tasklist_id,
+                            diff,
+                            &self.tx_wcmd,
+                            &new_org,
+                        ) {
+                            tracing::debug!("Updating cached Org for ino: {}", ino);
+                            *org = new_org;
+                            *write_time = SystemTime::now();
+                            self.tx_wcmd
+                                .send(WriteCommand::TouchTasklist { tasklist_id })
+                                .expect("Failed to send tasklist touch command");
+                        } else {
+                            tracing::debug!(
+                                "No changes detected during fsync for tasklist {}",
+                                tasklist_id
+                            );
+                        }
                     }
                     _ => {}
                 }

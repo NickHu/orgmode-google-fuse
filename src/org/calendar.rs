@@ -15,8 +15,8 @@ use orgize::ast::Headline;
 
 use crate::org::conflict::push_conflict_str;
 use crate::org::timestamp::Timestamp;
-use crate::org::MetaPendingContainer;
-use crate::write::{CalendarEventInsert, CalendarEventModify};
+use crate::org::{Diff, MetaPendingContainer};
+use crate::write::{CalendarEventInsert, CalendarEventModify, CalendarEventWrite, WriteCommand};
 
 use super::{def_org_meta, text_from_property_drawer, ByETag, Id, ToOrg};
 
@@ -134,6 +134,63 @@ impl OrgCalendar {
             transparency: text_from_property_drawer!(headline, "transparency"),
             ..Event::default()
         }
+    }
+
+    pub fn generate_commands(
+        &self,
+        diff: Diff,
+        tx_wcmd: &tokio::sync::mpsc::UnboundedSender<WriteCommand>,
+    ) -> bool {
+        let Diff {
+            added,
+            removed,
+            changed,
+            ..
+        } = diff;
+        self.with_meta(|meta| {
+            let calendar_id = meta.calendar().id.as_ref().unwrap();
+
+            let mut did_write = false;
+            for id in removed.map().keys() {
+                tracing::info!("Removing event with id {:?}", id);
+                tx_wcmd
+                    .send(WriteCommand::CalendarEvent {
+                        calendar_id: calendar_id.clone(),
+                        cmd: CalendarEventWrite::Modify {
+                            event_id: id.to_string(),
+                            modification: CalendarEventModify::Delete,
+                        },
+                    })
+                    .expect("Failed to send event delete command");
+                did_write = true;
+            }
+            for (id, updated) in changed {
+                let event = OrgCalendar::parse_event(&updated).into();
+                tracing::info!("Modifying event with id {:?}: {:?}", id, event);
+                tx_wcmd
+                    .send(WriteCommand::CalendarEvent {
+                        calendar_id: calendar_id.clone(),
+                        cmd: CalendarEventWrite::Modify {
+                            event_id: id.to_string(),
+                            modification: CalendarEventModify::Patch { event },
+                        },
+                    })
+                    .expect("Failed to send event modify command");
+                did_write = true;
+            }
+            for headline in added.fresh() {
+                let event = OrgCalendar::parse_event(headline).into();
+                tracing::info!("Adding new event: {:?}", event);
+                tx_wcmd
+                    .send(WriteCommand::CalendarEvent {
+                        calendar_id: calendar_id.clone(),
+                        cmd: CalendarEventWrite::Insert(CalendarEventInsert::Insert { event }),
+                    })
+                    .expect("Failed to send event insert command");
+                did_write = true;
+            }
+            did_write
+        })
     }
 }
 
