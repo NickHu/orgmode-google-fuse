@@ -100,6 +100,21 @@ pub(crate) struct MaybeIdMap {
     map: HashMap<Token, Headline>,
 }
 
+#[derive(Debug)]
+pub(crate) struct Move {
+    pub(crate) id: Token,
+    pub(crate) before: Option<Token>,
+    pub(crate) after: Option<Token>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Diff {
+    pub(crate) added: MaybeIdMap,
+    pub(crate) removed: MaybeIdMap,
+    pub(crate) changed: HashMap<Token, Headline>,
+    pub(crate) moves: Vec<Move>,
+}
+
 impl MaybeIdMap {
     fn insert(&mut self, id: Option<Token>, v: Headline) -> Option<Headline> {
         match id {
@@ -130,18 +145,7 @@ impl MaybeIdMap {
         self.fresh.iter()
     }
 
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn diff(
-        mut self,
-        mut other: MaybeIdMap,
-    ) -> (
-        MaybeIdMap,
-        MaybeIdMap,
-        (
-            HashMap<Token, Headline>,
-            Vec<(Token, (Option<Token>, Option<Token>))>,
-        ),
-    ) {
+    pub(crate) fn diff(mut self, mut other: MaybeIdMap) -> Diff {
         let intersection = self
             .map
             .keys()
@@ -193,17 +197,16 @@ impl MaybeIdMap {
                 if lis.binary_search(i).is_err() {
                     let j = lis.partition_point(|&x| x < *i);
                     // j first such that lis[j] >= i
-                    moves.push((
-                        (*id).clone(),
-                        (
-                            j.checked_sub(1).and_then(|j| lis.get(j)).map(|t| {
-                                permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()
-                            }),
-                            lis.get(j).map(|t| {
-                                permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()
-                            }),
-                        ),
-                    ));
+                    moves.push(Move {
+                        id: (*id).clone(),
+                        before: j
+                            .checked_sub(1)
+                            .and_then(|j| lis.get(j))
+                            .map(|t| permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()),
+                        after: lis
+                            .get(j)
+                            .map(|t| permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()),
+                    });
                     lis.insert(j, *i);
                 }
             }
@@ -220,7 +223,12 @@ impl MaybeIdMap {
 
         let _ = other.fresh.extract_if(|h| self.fresh.remove(h));
 
-        (self, other, (changed, moves))
+        Diff {
+            added: other,
+            removed: self,
+            changed,
+            moves,
+        }
     }
 }
 

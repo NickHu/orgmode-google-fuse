@@ -13,7 +13,6 @@ use itertools::Itertools;
 use libc::{EBADF, EINVAL, ENOENT, ENOTDIR};
 use orgize::Org;
 
-use crate::{org::ToOrg, Pid};
 use crate::{
     org::{
         calendar::OrgCalendar, conflict::read_conflict_local, tasklist::OrgTaskList, MaybeIdMap,
@@ -23,6 +22,10 @@ use crate::{
         CalendarEventInsert, CalendarEventModify, CalendarEventWrite, TaskInsert, TaskModify,
         TaskWrite, WriteCommand,
     },
+};
+use crate::{
+    org::{Move, ToOrg},
+    Pid,
 };
 
 const BLKSIZE: u32 = 512;
@@ -473,23 +476,18 @@ impl Filesystem for OrgFS {
                 let new_org = Org::parse(read_conflict_local(&written));
                 let new = MaybeIdMap::from(&new_org);
                 tracing::debug!("New: {:?} ", new);
-                let (removed, added, (changed, moves)) = old.diff(new);
-                tracing::debug!(
-                    "Computed diff\nRemoved: {:?}\nAdded: {:?}\nChanged: {:?}",
-                    removed,
-                    added,
-                    changed
-                );
-                assert!(removed.len() < n_old,
+                let diff = old.diff(new);
+                tracing::debug!("Computed diff\n{:#?}", diff);
+                assert!(diff.removed.len() < n_old,
                     "Refusing to delete **all** existing entries to prevent data loss\nThis is probably a bug");
-                for (id, headline) in added.map() {
+                for (id, headline) in diff.added.map() {
                     tracing::warn!(
                         "Found new entry with ID {} we didn't know about: {}",
                         id,
                         headline.title_raw()
                     );
                 }
-                for headline in removed.fresh() {
+                for headline in diff.removed.fresh() {
                     tracing::warn!("Found removed entry without ID: {}", headline.title_raw());
                 }
 
@@ -506,7 +504,7 @@ impl Filesystem for OrgFS {
                             let calendar_id = meta.calendar().id.as_ref().unwrap();
 
                             let mut did_write = false;
-                            for id in removed.map().keys() {
+                            for id in diff.removed.map().keys() {
                                 tracing::info!("Removing event with id {:?}", id);
                                 self.tx_wcmd
                                     .send(WriteCommand::CalendarEvent {
@@ -519,7 +517,7 @@ impl Filesystem for OrgFS {
                                     .expect("Failed to send event delete command");
                                 did_write = true;
                             }
-                            for (id, updated) in changed {
+                            for (id, updated) in diff.changed {
                                 let event = OrgCalendar::parse_event(&updated).into();
                                 tracing::info!("Modifying event with id {:?}: {:?}", id, event);
                                 self.tx_wcmd
@@ -533,7 +531,7 @@ impl Filesystem for OrgFS {
                                     .expect("Failed to send event modify command");
                                 did_write = true;
                             }
-                            for headline in added.fresh() {
+                            for headline in diff.added.fresh() {
                                 let event = OrgCalendar::parse_event(headline).into();
                                 tracing::info!("Adding new event: {:?}", event);
                                 self.tx_wcmd
@@ -576,7 +574,7 @@ impl Filesystem for OrgFS {
                             let tasklist_id = meta.tasklist().id.as_ref().unwrap();
 
                             let mut did_write = false;
-                            for id in removed.map().keys() {
+                            for id in diff.removed.map().keys() {
                                 tracing::info!("Removing task with id {:?}", id);
                                 self.tx_wcmd
                                     .send(WriteCommand::Task {
@@ -589,7 +587,12 @@ impl Filesystem for OrgFS {
                                     .expect("Failed to send task delete command");
                                 did_write = true;
                             }
-                            for (from, (pred, succ)) in moves {
+                            for Move {
+                                id: from,
+                                before: pred,
+                                after: succ,
+                            } in diff.moves
+                            {
                                 tracing::info!("Moving task {from:?} between ({pred:?}, {succ:?})");
                                 self.tx_wcmd
                                     .send(WriteCommand::Task {
@@ -603,7 +606,7 @@ impl Filesystem for OrgFS {
                                     .expect("Failed to send task move command");
                                 did_write = true;
                             }
-                            for (id, updated) in changed {
+                            for (id, updated) in diff.changed {
                                 let task = OrgTaskList::parse_task(&updated).into();
                                 tracing::info!("Modifying task with id {:?}: {:?}", id, task);
                                 self.tx_wcmd
@@ -617,7 +620,7 @@ impl Filesystem for OrgFS {
                                     .expect("Failed to send task modify command");
                                 did_write = true;
                             }
-                            for headline in added.fresh() {
+                            for headline in diff.added.fresh() {
                                 let task = OrgTaskList::parse_task(headline).into();
                                 tracing::info!("Adding new task: {:?}", task);
                                 self.tx_wcmd
