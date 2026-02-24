@@ -397,3 +397,72 @@ where
         meta
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use orgize::Org;
+
+    use crate::{
+        org::{conflict::read_conflict_local, tasklist::OrgTaskList},
+        write::WriteCommand,
+    };
+
+    use super::*;
+
+    #[test]
+    fn diff() {
+        insta::glob!("../fixtures", "*/pre.org", |path| {
+            let old_raw = std::fs::read_to_string(path.with_file_name("pre.org")).unwrap();
+            let new_raw = std::fs::read_to_string(path.with_file_name("post.org")).unwrap();
+            let (old_org, new_org) = (
+                Org::parse(read_conflict_local(&old_raw)),
+                Org::parse(read_conflict_local(&new_raw)),
+            );
+            let text_diff = similar::TextDiff::from_lines(&old_raw, &new_raw);
+            let (old, new) = (MaybeIdMap::from(&old_org), MaybeIdMap::from(&new_org));
+            insta::with_settings!({
+                description => text_diff.unified_diff().context_radius(20).header("pre.org", "post.org").to_string(),
+                snapshot_suffix => "diff",
+                omit_expression => true,
+                prepend_module_to_snapshot => false,
+            }, {
+                insta::assert_debug_snapshot!(format!("{}", path.parent().unwrap().file_name().unwrap().display()), old.diff(new));
+            });
+        });
+    }
+
+    #[test]
+    fn commands() {
+        insta::glob!("../fixtures", "*/pre.org", |path| {
+            let old_raw = std::fs::read_to_string(path.with_file_name("pre.org")).unwrap();
+            let new_raw = std::fs::read_to_string(path.with_file_name("post.org")).unwrap();
+            let (old_org, new_org) = (
+                Org::parse(read_conflict_local(&old_raw)),
+                Org::parse(read_conflict_local(&new_raw)),
+            );
+            let text_diff = similar::TextDiff::from_lines(&old_raw, &new_raw);
+            let (old, new) = (MaybeIdMap::from(&old_org), MaybeIdMap::from(&new_org));
+            let (tx_wcmd, mut rx_wcmd) = tokio::sync::mpsc::unbounded_channel::<WriteCommand>();
+            let diff = old.diff(new);
+            let mut commands = Vec::new();
+            OrgTaskList::generate_commands("", diff, &tx_wcmd, &new_org);
+            drop(tx_wcmd);
+            while let Some(cmd) = rx_wcmd.blocking_recv() {
+                match cmd {
+                    WriteCommand::Task { cmd, .. } => commands.push(cmd),
+                    _ => unreachable!(),
+                }
+            }
+            insta::with_settings!({
+                description => text_diff.unified_diff().context_radius(20).header("pre.org", "post.org").to_string(),
+                snapshot_suffix => "commands",
+                omit_expression => true,
+                prepend_module_to_snapshot => false,
+                filters => vec![(r"\s*[[:word:]]+: None,", "")],
+            }, {
+                insta::assert_debug_snapshot!(format!("{}", path.parent().unwrap().file_name().unwrap().display()), commands);
+            });
+        });
+    }
+}

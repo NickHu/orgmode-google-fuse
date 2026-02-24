@@ -1,0 +1,31 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -9,6 +9,8 @@\n :parent: a\n :END:\n \n+** TODO inserted\n+\n ** TODO c\n :PROPERTIES:\n :id: c\n"
+input_file: fixtures/insert_middle_child/pre.org
+---
+[
+    Insert(
+        Insert {
+            task: Task {
+                notes: Some(
+                    "",
+                ),
+                status: Some(
+                    "needsAction",
+                ),
+                title: Some(
+                    "inserted",
+                ),
+            },
+            new_parent: Some(
+                "a",
+            ),
+            new_predecessor: Some(
+                "b",
+            ),
+            new_successor: Some(
+                "c",
+            ),
+        },
+    ),
+]

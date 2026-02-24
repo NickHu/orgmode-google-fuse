@@ -1,0 +1,36 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -1,15 +1,15 @@\n * TODO a\n :PROPERTIES:\n :id: a\n :END:\n \n-* TODO b\n+** TODO b\n :PROPERTIES:\n :id: b\n :END:\n \n ** TODO c\n :PROPERTIES:\n :id: c\n :parent: b\n :END:\n"
+input_file: fixtures/indent_reparent_first_child/pre.org
+---
+Diff {
+    added: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    removed: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    changed: {},
+    moves: [
+        Move {
+            id: "c",
+            parent: Some(
+                "a",
+            ),
+            before: None,
+            after: None,
+        },
+        Move {
+            id: "b",
+            parent: Some(
+                "a",
+            ),
+            before: None,
+            after: Some(
+                "c",
+            ),
+        },
+    ],
+}

@@ -1,0 +1,32 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -3,6 +3,8 @@\n :id: a\n :END:\n \n+** TODO inserted\n+\n ** TODO b\n :PROPERTIES:\n :id: b\n"
+input_file: fixtures/insert_first_child/pre.org
+---
+Diff {
+    added: MaybeIdMap {
+        fresh: {
+            Headline {
+                syntax: HEADLINE@36..54
+                  HEADLINE_STARS@36..38 "**"
+                  WHITESPACE@38..39 " "
+                  HEADLINE_KEYWORD_TODO@39..43 "TODO"
+                  WHITESPACE@43..44 " "
+                  HEADLINE_TITLE@44..52
+                    TEXT@44..52 "inserted"
+                  NEW_LINE@52..53 "\n"
+                  SECTION@53..54
+                    PARAGRAPH@53..54
+                      BLANK_LINE@53..54 "\n"
+                ,
+            },
+        },
+        map: {},
+    },
+    removed: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    changed: {},
+    moves: [],
+}

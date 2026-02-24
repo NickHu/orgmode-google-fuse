@@ -1,0 +1,32 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -3,11 +3,6 @@\n :id: a\n :END:\n \n-<<<<<<< remote (read only)\n-=======\n-** TODO b\n->>>>>>> local\n-\n ** TODO c\n :PROPERTIES:\n :id: c\n"
+input_file: fixtures/remove_local_first_child/pre.org
+---
+Diff {
+    added: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    removed: MaybeIdMap {
+        fresh: {
+            Headline {
+                syntax: HEADLINE@36..47
+                  HEADLINE_STARS@36..38 "**"
+                  WHITESPACE@38..39 " "
+                  HEADLINE_KEYWORD_TODO@39..43 "TODO"
+                  WHITESPACE@43..44 " "
+                  HEADLINE_TITLE@44..45
+                    TEXT@44..45 "b"
+                  NEW_LINE@45..46 "\n"
+                  SECTION@46..47
+                    PARAGRAPH@46..47
+                      BLANK_LINE@46..47 "\n"
+                ,
+            },
+        },
+        map: {},
+    },
+    changed: {},
+    moves: [],
+}

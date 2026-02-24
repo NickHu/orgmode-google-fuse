@@ -1,0 +1,15 @@
+* TODO a
+:PROPERTIES:
+:id: a
+:END:
+
+<<<<<<< remote (read only)
+=======
+** TODO b
+>>>>>>> local
+
+** TODO c
+:PROPERTIES:
+:id: c
+:parent: a
+:END:

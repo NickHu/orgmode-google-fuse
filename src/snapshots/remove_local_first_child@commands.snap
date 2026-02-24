@@ -1,0 +1,6 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -3,11 +3,6 @@\n :id: a\n :END:\n \n-<<<<<<< remote (read only)\n-=======\n-** TODO b\n->>>>>>> local\n-\n ** TODO c\n :PROPERTIES:\n :id: c\n"
+input_file: fixtures/remove_local_first_child/pre.org
+---
+[]

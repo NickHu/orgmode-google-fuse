@@ -1,0 +1,22 @@
+* TODO a
+:PROPERTIES:
+:id: a
+:END:
+
+** TODO b
+:PROPERTIES:
+:id: b
+:parent: a
+:END:
+
+** TODO c
+:PROPERTIES:
+:id: c
+:parent: a
+:END:
+
+** TODO d
+:PROPERTIES:
+:id: d
+:parent: a
+:END:

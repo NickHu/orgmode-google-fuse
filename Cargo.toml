@@ -32,4 +32,6 @@ iana-time-zone = "0.1.65"
 atomic-time = "0.1.5"
 
 [dev-dependencies]
+insta = { version = "1.46.3", features = ["filters", "glob"] }
 proptest = "1.10.0"
+similar = "2.7.0"

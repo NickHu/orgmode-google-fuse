@@ -1,0 +1,34 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -9,7 +9,7 @@\n :parent: a\n :END:\n \n-** TODO c\n+* TODO c\n :PROPERTIES:\n :id: c\n :parent: a\n"
+input_file: fixtures/dedent_reparent_middle_child/pre.org
+---
+Diff {
+    added: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    removed: MaybeIdMap {
+        fresh: {},
+        map: {},
+    },
+    changed: {},
+    moves: [
+        Move {
+            id: "c",
+            parent: None,
+            before: Some(
+                "a",
+            ),
+            after: None,
+        },
+        Move {
+            id: "d",
+            parent: Some(
+                "c",
+            ),
+            before: None,
+            after: None,
+        },
+    ],
+}

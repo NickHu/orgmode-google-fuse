@@ -1,0 +1,22 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -1,15 +1,15 @@\n * TODO a\n :PROPERTIES:\n :id: a\n :END:\n \n-* TODO b\n+** TODO b\n :PROPERTIES:\n :id: b\n :END:\n \n ** TODO c\n :PROPERTIES:\n :id: c\n :parent: b\n :END:\n"
+input_file: fixtures/indent_reparent_first_child/pre.org
+---
+[
+    Move {
+        task_id: "c",
+        new_parent: Some(
+            "a",
+        ),
+    },
+    Move {
+        task_id: "b",
+        new_parent: Some(
+            "a",
+        ),
+        new_successor: Some(
+            "c",
+        ),
+    },
+]

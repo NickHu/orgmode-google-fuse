@@ -1,0 +1,19 @@
+---
+source: src/org.rs
+description: "--- pre.org\n+++ post.org\n@@ -9,7 +9,7 @@\n :parent: a\n :END:\n \n-** TODO c\n+* TODO c\n :PROPERTIES:\n :id: c\n :parent: a\n"
+input_file: fixtures/dedent_reparent_middle_child/pre.org
+---
+[
+    Move {
+        task_id: "c",
+        new_predecessor: Some(
+            "a",
+        ),
+    },
+    Move {
+        task_id: "d",
+        new_parent: Some(
+            "c",
+        ),
+    },
+]
