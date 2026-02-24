@@ -26,8 +26,8 @@
 
           mountPoint = mkOption {
             type = types.str;
-            description = "Base mount point (relative to user state directory <literal>$XDG_STATE_HOME<literal>).";
-            default = "orgmode-google-fuse/google";
+            description = "Base mount point (relative to user state directory <literal>$XDG_STATE_HOME/orgmode-google-fuse<literal>).";
+            default = "google";
           };
 
           systemdTarget = mkOption {
@@ -53,7 +53,7 @@
           Install.WantedBy = [ cfg.systemdTarget ];
           Service = {
             ExecStart = ''
-              ${pkgs.lib.getExe cfg.package} %S/${cfg.mountPoint}
+              ${pkgs.lib.getExe cfg.package} %S/orgmode-google-fuse/${cfg.mountPoint}
             '';
           };
         };
@@ -63,7 +63,7 @@
           config = {
             ProgramArguments = [
               "${pkgs.lib.getExe cfg.package}"
-              # TODO: "???/${cfg.mountPoint}"
+              "$HOME/Library/Application Support/orgmode-google-fuse/${cfg.mountPoint}"
             ];
             KeepAlive = true;
             RunAtLoad = true;
