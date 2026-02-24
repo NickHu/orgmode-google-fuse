@@ -139,6 +139,7 @@ impl OrgTaskList {
         }
         for Move {
             id: from,
+            parent,
             before: pred,
             after: succ,
         } in moves
@@ -149,6 +150,7 @@ impl OrgTaskList {
                     tasklist_id: tasklist_id.to_owned(),
                     cmd: TaskWrite::Move {
                         task_id: from.to_string(),
+                        new_parent: parent.map(|x| x.to_string()),
                         new_predecessor: pred.map(|x| x.to_string()),
                         new_successor: succ.map(|x| x.to_string()),
                     },
@@ -216,7 +218,12 @@ impl OrgTaskList {
             tx_wcmd
                 .send(WriteCommand::Task {
                     tasklist_id: tasklist_id.to_owned(),
-                    cmd: TaskWrite::Insert(TaskInsert::Insert { task }),
+                    cmd: TaskWrite::Insert(TaskInsert::Insert {
+                        task,
+                        new_parent,
+                        new_predecessor,
+                        new_successor,
+                    }),
                 })
                 .expect("Failed to send task insert command");
             did_write = true;
@@ -305,66 +312,75 @@ impl ToOrg for OrgTaskList {
         let meta = handle.meta().expect("meta not found");
         let pending = meta.pending();
         let read_ref = handle.read().unwrap();
-        [
-            read_ref
-                .iter()
-                .sorted_by_key(|(id, tasks)| {
-                    let task = tasks
-                        .get_one()
-                        .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
-                    format!(
-                        "{}{}",
-                        task.0
-                            .parent
-                            .as_ref()
-                            .and_then(|id| {
-                                let parent = read_ref[id]
-                                    .get_one()
-                                    .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
-                                parent.0.position.clone()
-                            })
-                            .unwrap_or_default(),
-                        task.0.position.as_deref().unwrap_or_default(),
-                    )
-                })
-                .map(|(id, tasks)| {
-                    let task = tasks
-                        .get_one()
-                        .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
-                    let level = if task.0.parent.is_some() { "**" } else { "*" };
-                    let mut str = String::new();
-                    match pending.1.get(id) {
-                        Some(TaskModify::Patch { task: new_task }) => {
-                            push_conflict_str(
-                                &mut str,
-                                &render_task(&task.0, format!("{level} COMMENT "), true),
-                                &render_task(new_task, format!("{level} "), false),
-                            );
-                        }
-                        Some(TaskModify::Delete) => {
-                            push_conflict_str(
-                                &mut str,
-                                &render_task(&task.0, format!("{level} COMMENT "), true),
-                                "",
-                            );
-                        }
-                        None => str.push_str(&render_task(&task.0, format!("{level} "), true)),
+
+        // statefully insert pending edits in-place
+        let mut inserts: Vec<_> = pending.0.iter().collect();
+        inserts.reverse();
+        let str = read_ref
+            .iter()
+            .sorted_by_key(|(id, tasks)| {
+                let task = tasks
+                    .get_one()
+                    .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
+                format!(
+                    "{}{}",
+                    task.0
+                        .parent
+                        .as_ref()
+                        .and_then(|id| {
+                            let parent = read_ref[id]
+                                .get_one()
+                                .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
+                            parent.0.position.clone()
+                        })
+                        .unwrap_or_default(),
+                    task.0.position.as_deref().unwrap_or_default(),
+                )
+            })
+            .map(|(id, tasks)| {
+                let task = tasks
+                    .get_one()
+                    .unwrap_or_else(|| panic!("No tasks found for id: {id}"));
+                let level = if task.0.parent.is_some() { "**" } else { "*" };
+                let mut str = String::new();
+                match pending.1.get(id) {
+                    Some(TaskModify::Patch { task: new_task }) => {
+                        push_conflict_str(
+                            &mut str,
+                            &render_task(&task.0, format!("{level} COMMENT "), true),
+                            &render_task(new_task, format!("{level} "), false),
+                        );
                     }
-                    str
-                })
-                .collect::<Vec<_>>(),
-            pending
-                .0
-                .iter()
-                .map(|TaskInsert::Insert { task }| {
-                    let mut str = String::new();
+                    Some(TaskModify::Delete) => {
+                        push_conflict_str(
+                            &mut str,
+                            &render_task(&task.0, format!("{level} COMMENT "), true),
+                            "",
+                        );
+                    }
+                    None => str.push_str(&render_task(&task.0, format!("{level} "), true)),
+                }
+                let is = inserts.extract_if(.., |TaskInsert::Insert { new_parent, .. }| {
+                    new_parent.as_ref() == Some(id)
+                });
+                for TaskInsert::Insert { task, .. } in is {
+                    push_conflict_str(&mut str, "", &render_task(task, "** ".to_owned(), false));
+                }
+                let is = inserts.extract_if(
+                    ..,
+                    |TaskInsert::Insert {
+                         new_predecessor, ..
+                     }| new_predecessor.as_ref() == Some(id),
+                );
+                for TaskInsert::Insert { task, .. } in is {
                     push_conflict_str(&mut str, "", &render_task(task, "* ".to_owned(), false));
-                    str
-                })
-                .collect::<Vec<_>>(),
-        ]
-        .concat()
-        .join("\n")
+                }
+                str
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(inserts.len(), 0, "leftover pending inserts not rendered");
+        str
     }
 }
 

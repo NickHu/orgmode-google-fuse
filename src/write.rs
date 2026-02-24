@@ -131,6 +131,7 @@ pub(crate) enum TaskWrite {
     },
     Move {
         task_id: String,
+        new_parent: Option<String>,
         new_predecessor: Option<String>,
         new_successor: Option<String>,
     },
@@ -138,18 +139,39 @@ pub(crate) enum TaskWrite {
 
 #[derive(Debug, Clone)]
 pub(crate) enum TaskInsert {
-    Insert { task: Box<Task> },
+    Insert {
+        task: Box<Task>,
+        new_parent: Option<String>,
+        new_predecessor: Option<String>,
+        new_successor: Option<String>,
+    },
 }
 
 impl PartialEq for TaskInsert {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (TaskInsert::Insert { task: task1 }, TaskInsert::Insert { task: task2 }) => {
+            (
+                TaskInsert::Insert {
+                    task: task1,
+                    new_parent: new_parent1,
+                    new_predecessor: new_predecessor1,
+                    new_successor: new_successor1,
+                },
+                TaskInsert::Insert {
+                    task: task2,
+                    new_parent: new_parent2,
+                    new_predecessor: new_predecessor2,
+                    new_successor: new_successor2,
+                },
+            ) => {
                 task1.completed == task2.completed
                     && task1.due == task2.due
                     && task1.notes == task2.notes
                     && task1.status == task2.status
                     && task1.title == task2.title
+                    && new_parent1 == new_parent2
+                    && new_predecessor1 == new_predecessor2
+                    && new_successor1 == new_successor2
             }
         }
     }
@@ -160,12 +182,20 @@ impl Eq for TaskInsert {}
 impl std::hash::Hash for TaskInsert {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            TaskInsert::Insert { task } => {
+            TaskInsert::Insert {
+                task,
+                new_parent,
+                new_predecessor,
+                new_successor,
+            } => {
                 task.completed.hash(state);
                 task.due.hash(state);
                 task.notes.hash(state);
                 task.status.hash(state);
                 task.title.hash(state);
+                new_parent.hash(state);
+                new_predecessor.hash(state);
+                new_successor.hash(state);
             }
         }
     }
@@ -230,8 +260,21 @@ async fn process_tasklist_write(
 ) {
     let tasklist_id = tasklist.with_meta(|m| m.tasklist().id.clone()).unwrap();
     match cmd {
-        TaskWrite::Insert(TaskInsert::Insert { task }) => {
-            if let Ok(mut new) = client.insert_task(&tasklist_id, *task.clone()).await {
+        TaskWrite::Insert(TaskInsert::Insert {
+            task,
+            new_parent,
+            new_predecessor,
+            new_successor,
+        }) => {
+            if let Ok(mut new) = client
+                .insert_task(
+                    &tasklist_id,
+                    *task.clone(),
+                    new_parent.as_deref(),
+                    new_predecessor.as_deref(),
+                )
+                .await
+            {
                 bump_position(&mut new);
                 let id = new
                     .id
@@ -241,23 +284,38 @@ async fn process_tasklist_write(
                 tasklist.add_id(&id, new);
             } else {
                 tracing::error!("Failed to insert task; saving");
-                tasklist.push_pending_insert(TaskInsert::Insert { task });
+                tasklist.push_pending_insert(TaskInsert::Insert {
+                    task,
+                    new_parent,
+                    new_predecessor,
+                    new_successor,
+                });
             }
         }
         TaskWrite::Move {
             task_id,
+            new_parent,
             new_predecessor,
             new_successor,
         } => {
             if let Ok(mut new) = client
-                .move_task(&tasklist_id, &task_id, new_predecessor.as_deref())
+                .move_task(
+                    &tasklist_id,
+                    &task_id,
+                    new_parent.as_deref(),
+                    new_predecessor.as_deref(),
+                )
                 .await
             {
                 tracing::debug!("Moved task with id: {}", task_id);
                 // modify the task to cheat and keep the global order correct; proper indices are
                 // restored on the next sync
-                let position = (|| match (new_predecessor.as_deref(), new_successor.as_deref()) {
-                    (Some(pred), Some(succ)) => {
+                let position = (|| match (
+                    new_parent.as_deref(),
+                    new_predecessor.as_deref(),
+                    new_successor.as_deref(),
+                ) {
+                    (_, Some(pred), Some(succ)) | (Some(pred), None, Some(succ)) => {
                         tracing::debug!("Moved task {} between {} and {}", task_id, pred, succ);
                         let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
                         let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
@@ -273,7 +331,7 @@ async fn process_tasklist_write(
                         ));
                         Some(midpoint)
                     }
-                    (Some(pred), None) => {
+                    (_, Some(pred), None) | (Some(pred), None, None) => {
                         tracing::debug!("Moved task {} after {}", task_id, pred);
                         let p = &tasklist.get_id(pred).expect("Task not found").0.position?;
                         let next = digit_stream_to_string(streaming_midpoint(
@@ -282,7 +340,7 @@ async fn process_tasklist_write(
                         ));
                         Some(next)
                     }
-                    (None, Some(succ)) => {
+                    (None, None, Some(succ)) => {
                         tracing::debug!("Moved task {} before {}", task_id, succ);
                         let n = &tasklist.get_id(succ).expect("Task not found").0.position?;
                         let prev = digit_stream_to_string(streaming_midpoint(
@@ -291,8 +349,10 @@ async fn process_tasklist_write(
                         ));
                         Some(prev)
                     }
-                    (None, None) => {
-                        unreachable!("Move must have at least a predecessor or successor");
+                    (None, None, None) => {
+                        unreachable!(
+                            "Move must have at least a predecessor or successor or parent"
+                        );
                     }
                 })();
                 new.position = position;

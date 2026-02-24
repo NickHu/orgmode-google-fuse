@@ -103,6 +103,7 @@ pub(crate) struct MaybeIdMap {
 #[derive(Debug)]
 pub(crate) struct Move {
     pub(crate) id: Token,
+    pub(crate) parent: Option<Token>,
     pub(crate) before: Option<Token>,
     pub(crate) after: Option<Token>,
 }
@@ -149,65 +150,120 @@ impl MaybeIdMap {
         let intersection = self
             .map
             .keys()
-            .filter(|k| other.map.contains_key(*k))
+            .filter(|&k| other.map.contains_key(k))
             .cloned()
             .collect::<Vec<_>>();
         let moves = {
-            let permutation = intersection
-                .iter()
-                .sorted_unstable_by_key(|k| other.map[*k].start())
-                .enumerate()
-                .sorted_unstable_by_key(|(_, k)| self.map[*k].start())
-                .collect::<Vec<_>>();
-            fn longest_increasing_subsequence<T: Debug, K: Ord, F: Fn(&T) -> K>(
+            fn longest_increasing_subsequence<T: Debug + Copy, K: Ord, F: Fn(&T) -> K>(
                 sequence: &[T],
                 key: F,
-            ) -> Vec<K> {
+            ) -> Vec<T> {
                 let mut iter = sequence.iter().enumerate();
-                let (i, x) = iter.next().unwrap();
-
-                let mut min_ending_of_length = Vec::new();
-                let mut predecessor = vec![None; sequence.len()];
-                min_ending_of_length.push((i, x));
-                for (i, x) in iter {
-                    let (prev_i, prev_longest) = min_ending_of_length.last().copied().unwrap();
-                    if key(x) > key(prev_longest) {
-                        predecessor[i] = Some(prev_i);
-                        min_ending_of_length.push((i, x));
-                    } else {
-                        let j = min_ending_of_length.partition_point(|(_, y)| key(y) < key(x));
-                        // j is the first such that key(x) <= key(min_ending_of_length[j].1)
-                        predecessor[i] = predecessor[j];
-                        min_ending_of_length[j] = (i, x);
+                if let Some((i, x)) = iter.next() {
+                    let mut min_ending_of_length = Vec::new();
+                    let mut predecessor = vec![None; sequence.len()];
+                    min_ending_of_length.push((i, x));
+                    for (i, x) in iter {
+                        let (prev_i, prev_longest) = min_ending_of_length.last().copied().unwrap();
+                        if key(x) > key(prev_longest) {
+                            predecessor[i] = Some(prev_i);
+                            min_ending_of_length.push((i, x));
+                        } else {
+                            let j = min_ending_of_length.partition_point(|(_, y)| key(y) < key(x));
+                            // j is the first such that key(x) <= key(min_ending_of_length[j].1)
+                            predecessor[i] = predecessor[j];
+                            min_ending_of_length[j] = (i, x);
+                        }
                     }
+                    let mut lis = Vec::with_capacity(min_ending_of_length.len());
+                    let (mut i, _) = min_ending_of_length.pop().unwrap();
+                    lis.push(sequence[i]);
+                    while let Some(prev_i) = predecessor[i] {
+                        lis.push(sequence[prev_i]);
+                        i = prev_i;
+                    }
+                    lis.reverse();
+                    lis
+                } else {
+                    Vec::new()
                 }
-                let mut lis = Vec::with_capacity(min_ending_of_length.len());
-                let (mut i, _) = min_ending_of_length.pop().unwrap();
-                lis.push(key(&sequence[i]));
-                while let Some(prev_i) = predecessor[i] {
-                    lis.push(key(&sequence[prev_i]));
-                    i = prev_i;
-                }
-                lis.reverse();
-                lis
             }
-            let mut lis = longest_increasing_subsequence(&permutation, |(i, _)| *i);
-            let mut moves = Vec::with_capacity(permutation.len() - lis.len());
-            for (i, id) in &permutation {
-                if lis.binary_search(i).is_err() {
-                    let j = lis.partition_point(|&x| x < *i);
-                    // j first such that lis[j] >= i
+            let mut moves = Vec::new();
+            // per parent, find the fixed collection (LIS) of elements which are
+            // 1. correctly parented
+            // 2. already in the correct order (relatively)
+            for parent in std::iter::chain(
+                std::iter::once(None),
+                intersection
+                    .iter()
+                    .filter(|&p| other.map[p].headlines().next().is_some())
+                    .map(Some),
+            ) {
+                let source_children: HashSet<_> = {
+                    other
+                        .map
+                        .iter()
+                        .filter_map(|(k, h)| {
+                            (h.properties()
+                                .and_then(|props| props.get("parent"))
+                                .as_ref()
+                                == parent)
+                                .then_some(k)
+                        })
+                        .cloned()
+                }
+                .collect();
+                let target_children = {
+                    match parent {
+                        Some(p) => {
+                            assert_eq!(p, parent.unwrap());
+                            other
+                                .map
+                                .values()
+                                .find(|h| {
+                                    h.properties().and_then(|props| props.get("id")).as_ref()
+                                        == parent
+                                })
+                                .unwrap()
+                                .headlines()
+                                .flat_map(|h| h.properties().and_then(|props| props.get("id")))
+                                .collect()
+                        }
+                        None => other
+                            .map
+                            .iter()
+                            .filter_map(|(k, h)| (h.level() == 1).then_some(k))
+                            .cloned()
+                            .collect(),
+                    }
+                };
+                let permutation = &source_children
+                    .intersection(&target_children)
+                    .sorted_unstable_by_key(|&k| self.map[k].start())
+                    .collect::<Vec<_>>();
+                let mut lis: Vec<_> =
+                    longest_increasing_subsequence(permutation, |&k| other.map[k].start())
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                for id in target_children
+                    .iter()
+                    .sorted_unstable_by_key(|&k| self.map[k].start())
+                    .rev()
+                    .filter(|&c| {
+                        lis.binary_search_by_key(&self.map[c].start(), |k| self.map[k].start())
+                            .is_err()
+                    })
+                    .collect::<Vec<_>>()
+                {
+                    let j = lis.partition_point(|k| other.map[k].start() < other.map[id].start());
                     moves.push(Move {
-                        id: (*id).clone(),
-                        before: j
-                            .checked_sub(1)
-                            .and_then(|j| lis.get(j))
-                            .map(|t| permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()),
-                        after: lis
-                            .get(j)
-                            .map(|t| permutation.iter().find(|(k, _)| k == t).unwrap().1.clone()),
+                        id: id.clone(),
+                        parent: parent.cloned(),
+                        before: j.checked_sub(1).and_then(|j| lis.get(j)).cloned(),
+                        after: lis.get(j).cloned(),
                     });
-                    lis.insert(j, *i);
+                    lis.insert(j, id.clone());
                 }
             }
             moves

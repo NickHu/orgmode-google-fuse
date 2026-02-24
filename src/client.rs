@@ -212,11 +212,23 @@ impl GoogleClient {
         .map(|(_res, task)| task)
     }
 
-    pub async fn insert_task(&self, tasklist_id: &str, task: Task) -> Result<Task> {
-        timeout(
-            TIMEOUT,
-            self.taskshub.tasks().insert(task, tasklist_id).doit(),
-        )
+    pub async fn insert_task(
+        &self,
+        tasklist_id: &str,
+        task: Task,
+        new_parent: Option<&str>,
+        new_predecessor: Option<&str>,
+    ) -> Result<Task> {
+        timeout(TIMEOUT, {
+            let mut call = self.taskshub.tasks().insert(task, tasklist_id);
+            if let Some(new_parent) = new_parent {
+                call = call.parent(new_parent)
+            }
+            if let Some(new_predecessor) = new_predecessor {
+                call = call.previous(new_predecessor)
+            }
+            call.doit()
+        })
         .await
         .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
         .map(|(_res, task)| task)
@@ -249,20 +261,19 @@ impl GoogleClient {
         &self,
         tasklist_id: &str,
         task_id: &str,
+        new_parent: Option<&str>,
         new_predecessor: Option<&str>,
     ) -> Result<Task> {
-        timeout(
-            TIMEOUT,
+        timeout(TIMEOUT, {
+            let mut call = self.taskshub.tasks().move_(tasklist_id, task_id);
+            if let Some(new_parent) = new_parent {
+                call = call.parent(new_parent)
+            }
             if let Some(new_predecessor) = new_predecessor {
-                self.taskshub
-                    .tasks()
-                    .move_(tasklist_id, task_id)
-                    .previous(new_predecessor)
-                    .doit()
-            } else {
-                self.taskshub.tasks().move_(tasklist_id, task_id).doit()
-            },
-        )
+                call = call.previous(new_predecessor)
+            }
+            call.doit()
+        })
         .await
         .unwrap_or_else(|e| Err(google_tasks1::Error::Io(e.into())))
         .map(|(_res, task)| task)
