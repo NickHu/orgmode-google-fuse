@@ -60,13 +60,6 @@ impl OrgTaskList {
                 continue;
             };
             if guard.contains_key(id) {
-                {
-                    let v = guard.get_one(id).unwrap();
-                    if v.0.etag == t.etag {
-                        tracing::debug!("Task {id} is up to date, skipping update");
-                        continue;
-                    }
-                }
                 // Update existing task
                 match t.deleted {
                     Some(true) => {
