@@ -217,7 +217,20 @@ impl MaybeIdMap {
             .filter_map(|k| {
                 let old = self.map.remove(&k).unwrap();
                 let new = other.map.remove(&k).unwrap();
-                (old.raw().trim() != new.raw().trim()).then_some((k, new))
+                fn raw_headline(headline: &Headline) -> String {
+                    let mut str = headline.raw();
+                    if let Some(end) = headline
+                        .headlines()
+                        .next()
+                        .and_then(|child| child.start().checked_sub(headline.start()))
+                    {
+                        let _ = str.split_off(end.into());
+                    }
+                    str
+                }
+                (raw_headline(&old).trim().trim_start_matches('*')
+                    != raw_headline(&new).trim().trim_start_matches('*'))
+                .then_some((k, new))
             })
             .collect();
 
