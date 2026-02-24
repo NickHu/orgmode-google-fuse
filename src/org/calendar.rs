@@ -12,6 +12,7 @@ use evmap::{ReadHandle, ReadHandleFactory, WriteHandle};
 use google_calendar3::api::{CalendarListEntry, Event, EventDateTime, Events};
 use itertools::Itertools;
 use orgize::ast::Headline;
+use orgize::rowan::ast::AstNode;
 
 use crate::org::conflict::push_conflict_str;
 use crate::org::timestamp::Timestamp;
@@ -91,38 +92,50 @@ impl OrgCalendar {
     }
 
     pub fn parse_event(headline: &Headline) -> Event {
+        let section = headline.section().unwrap();
+        let paragraph = section.syntax().first_child().unwrap();
+        let timestamp = orgize::ast::Timestamp::cast(paragraph.first_child().unwrap()).unwrap();
+        let description = headline
+            .raw()
+            .split_off(
+                timestamp
+                    .end()
+                    .checked_sub(headline.start())
+                    .unwrap_or_default()
+                    .into(),
+            )
+            .trim()
+            .to_owned();
         Event {
-            description: headline.section().map(|s| s.raw().trim().to_owned()),
-            end: headline.scheduled().and_then(|p| {
-                let dt = p.end_to_chrono()?;
-                if p.hour_end().is_some() {
-                    Some(EventDateTime {
+            description: (!description.is_empty()).then_some(description),
+            end: end_to_chrono(&timestamp).map(|dt| {
+                if timestamp.hour_end().is_some() {
+                    EventDateTime {
                         date: None,
                         date_time: Some(dt.and_utc()),
                         time_zone: iana_time_zone::get_timezone().ok(),
-                    })
+                    }
                 } else {
-                    Some(EventDateTime {
+                    EventDateTime {
                         date: Some(dt.date()),
                         date_time: None,
                         time_zone: None,
-                    })
+                    }
                 }
             }),
-            start: headline.scheduled().and_then(|p| {
-                let dt = p.start_to_chrono()?;
-                if p.hour_start().is_some() {
-                    Some(EventDateTime {
+            start: start_to_chrono(&timestamp).map(|dt| {
+                if timestamp.hour_start().is_some() {
+                    EventDateTime {
                         date: None,
                         date_time: Some(dt.and_utc()),
                         time_zone: iana_time_zone::get_timezone().ok(),
-                    })
+                    }
                 } else {
-                    Some(EventDateTime {
+                    EventDateTime {
                         date: Some(dt.date()),
                         date_time: None,
                         time_zone: None,
-                    })
+                    }
                 }
             }),
             summary: Some(headline.title_raw()),
@@ -351,19 +364,6 @@ fn render_event(event: &Event, prefix: String, with_properties: bool) -> String 
         str.push_str("Untitled Event");
     }
     str.push('\n');
-    match (&event.start, &event.end) {
-        (Some(start), Some(end)) => {
-            str.push_str(
-                format!(
-                    "SCHEDULED: {}--{}\n",
-                    Timestamp::from(start.clone()).to_org_string(),
-                    Timestamp::from(end.clone()).to_org_string()
-                )
-                .as_str(),
-            );
-        }
-        (_, _) => unreachable!(),
-    }
 
     if with_properties {
         // PROPERTIES
@@ -394,6 +394,19 @@ fn render_event(event: &Event, prefix: String, with_properties: bool) -> String 
     }
 
     // SECTION
+    match (&event.start, &event.end) {
+        (Some(start), Some(end)) => {
+            str.push_str(
+                format!(
+                    "{}--{}\n",
+                    Timestamp::from(start.clone()).to_org_string(),
+                    Timestamp::from(end.clone()).to_org_string()
+                )
+                .as_str(),
+            );
+        }
+        (_, _) => unreachable!(),
+    }
     if let Some(description) = &event.description {
         str.push('\n');
         str.push_str(description);
@@ -401,4 +414,74 @@ fn render_event(event: &Event, prefix: String, with_properties: bool) -> String 
     }
 
     str
+}
+
+// the methods provided by orgize don't work if a time is not specified
+fn start_to_chrono(ts: &orgize::ast::Timestamp) -> Option<chrono::NaiveDateTime> {
+    match ts.start_to_chrono() {
+        Some(dt) => Some(dt),
+        None => {
+            let y = ts.year_start()?.parse().ok()?;
+            let m = ts.month_start()?.parse().ok()?;
+            let d = ts.day_start()?.parse().ok()?;
+            chrono::NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)
+        }
+    }
+}
+fn end_to_chrono(ts: &orgize::ast::Timestamp) -> Option<chrono::NaiveDateTime> {
+    match ts.end_to_chrono() {
+        Some(dt) => Some(dt),
+        None => {
+            let y = ts.year_end()?.parse().ok()?;
+            let m = ts.month_end()?.parse().ok()?;
+            let d = ts.day_end()?.parse().ok()?;
+            chrono::NaiveDate::from_ymd_opt(y, m, d)?.and_hms_opt(0, 0, 0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use orgize::{ast::Headline, rowan::ast::AstNode, Org};
+
+    #[test]
+    fn parse_event() {
+        let raw = r#"
+* Title
+:PROPERTIES:
+:id: a
+:END:
+<1970-01-01>--<1970-01-01>
+
+Description
+"#;
+        let org = Org::parse(raw);
+        let headline: Headline = org.first_node().unwrap();
+        assert_eq!(headline.title_raw(), "Title");
+        assert_eq!(
+            headline
+                .properties()
+                .unwrap()
+                .get("id")
+                .unwrap()
+                .to_string(),
+            "a"
+        );
+        let section = headline.section().unwrap();
+        let paragraph = section.syntax().first_child().unwrap();
+        let timestamp = orgize::ast::Timestamp::cast(paragraph.first_child().unwrap()).unwrap();
+        assert_eq!(
+            super::start_to_chrono(&timestamp).map(|dt| dt.date()),
+            chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+        );
+        let mut leading = headline.raw();
+        let trailing = leading.split_off(
+            timestamp
+                .end()
+                .checked_sub(headline.start())
+                .unwrap_or_default()
+                .into(),
+        );
+        assert_eq!(trailing.trim(), "Description");
+    }
 }
